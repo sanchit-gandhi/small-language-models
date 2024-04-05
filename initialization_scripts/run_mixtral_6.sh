@@ -1,4 +1,4 @@
-# Model arguments
+#!/usr/bin/env bash
 
 python run_initialization.py \
   --model_name_or_path "mistralai/Mixtral-8x7B-v0.1" \
