@@ -174,11 +174,11 @@ def main():
         if model_args.hub_model_id is None:
             repo_name = get_full_repo_name(
                 Path(model_args.output_dir).absolute().name,
-                token=model_args.hub_token,
+                token=model_args.token,
             )
         else:
             repo_name = model_args.hub_model_id
-        create_repo(repo_name, exist_ok=True, token=model_args.hub_token)
+        create_repo(repo_name, exist_ok=True, token=model_args.token)
         upload_folder(
             repo_id=repo_name,
             folder_path=model_args.output_dir,
