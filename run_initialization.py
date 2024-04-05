@@ -8,7 +8,8 @@ from typing import Optional
 import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser
-from huggingface_hub import upload_folder
+from huggingface_hub import upload_folder, get_full_repo_name, create_repo
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -118,14 +119,14 @@ def main():
     student_config.num_hidden_layers = model_args.num_hidden_layers
     teacher_hidden_layers = teacher_config.num_hidden_layers
 
-    if model_args.initilization_strategy == "maximally_spaced":
+    if model_args.initialization_strategy == "maximally_spaced":
         decoder_mapping = np.linspace(0, teacher_hidden_layers - 1, student_config.num_hidden_layers, dtype=int)
         decoder_mapping[-1] = teacher_hidden_layers - 1
-    elif model_args.initilization_strategy == "first_n":
+    elif model_args.initialization_strategy == "first_n":
         decoder_mapping = np.arange(0, student_config.num_hidden_layers)
     else:
         raise ValueError(
-            f"Got invalid initialization strategy '{model_args.initilization_strategy}', should be one of "
+            f"Got invalid initialization_strategy strategy '{model_args.initialization_strategy}', should be one of "
             "'maximally_spaced` or `first_n`."
         )
 
@@ -170,9 +171,16 @@ def main():
         generation_config.save_pretrained(model_args.output_dir)
 
     if model_args.push_to_hub:
-        repo_id = model_args.hub_model_id or model_args.output_dir
+        if model_args.hub_model_id is None:
+            repo_name = get_full_repo_name(
+                Path(model_args.output_dir).absolute().name,
+                token=model_args.hub_token,
+            )
+        else:
+            repo_name = model_args.hub_model_id
+        create_repo(repo_name, exist_ok=True, token=model_args.hub_token)
         upload_folder(
-            repo_id=repo_id,
+            repo_id=repo_name,
             folder_path=model_args.output_dir,
             commit_description="Uploading initialised weights and configs",
         )
