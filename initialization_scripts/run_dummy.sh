@@ -5,5 +5,5 @@ python run_initialization.py \
   --num_hidden_layers "1" \
   --output_dir "./" \
   --push_to_hub \
-  --hub_model_id "tiny-random-MistralForCausalLM-1-layer"
+  --hub_model_id "sanchit-gandhi/tiny-random-MistralForCausalLM-1-layer"
 
