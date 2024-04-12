@@ -1,8 +1,8 @@
 python run_sft.py \
   --model_name_or_path "sanchit-gandhi/tiny-random-MistralForCausalLM-1-layer" \
   --output_dir "./" \
-  --dataset_name "HuggingFaceTB/cosmopedia-100k" \
-  --dataset_config_name "default" \
+  --train_dataset_name "HuggingFaceTB/cosmopedia-100k" \
+  --train_dataset_config_name "default" \
 	--train_split_name "train" \
 	--eval_split_name "train" \
 	--do_train \
@@ -15,4 +15,6 @@ python run_sft.py \
   --save_strategy "no" \
 	--evaluation_strategy "epoch" \
 	--logging_steps 1 \
-  --overwrite_output_dir
+  --overwrite_output_dir \
+  --output_router_logits False \
+  --report_to "wandb"
