@@ -3,13 +3,14 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import torch
+from huggingface_hub import create_repo, get_full_repo_name, upload_folder
 from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser
-from huggingface_hub import upload_folder, get_full_repo_name, create_repo
-from pathlib import Path
+
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ class ModelArguments:
     """
     Arguments pertaining to which model/config/tokenizer we are going to fine-tune.
     """
+
     model_name_or_path: Optional[str] = field(
         metadata={"help": "The teacher checkpoint for weights initialization"},
     )
@@ -50,7 +52,9 @@ class ModelArguments:
             "choices": ["auto", "bfloat16", "float16", "float32"],
         },
     )
-    trust_remote_code: Optional[bool] = field(default=False, metadata={"help": "Trust remote code when loading a model."})
+    trust_remote_code: Optional[bool] = field(
+        default=False, metadata={"help": "Trust remote code when loading a model."}
+    )
     token: Optional[bool] = field(
         default=True,
         metadata={
@@ -75,7 +79,10 @@ class ModelArguments:
         },
     )
     initialization_strategy: Optional[str] = field(
-        default="maximally_spaced", metadata={"help": "The weight initialization strategy for the decoder weights. Either `first_n`, or `maximally_spaced`."}
+        default="maximally_spaced",
+        metadata={
+            "help": "The weight initialization strategy for the decoder weights. Either `first_n`, or `maximally_spaced`."
+        },
     )
 
 

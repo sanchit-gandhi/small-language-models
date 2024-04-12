@@ -19,6 +19,7 @@ Training langauge models Whisper model for conditional language modelling tasks 
 # You can also adapt this script for your own distillation tasks. Pointers for this are left as comments.
 
 import logging
+import math
 import os
 import re
 import shutil
@@ -27,11 +28,9 @@ import time
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import datasets
-import evaluate
-import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -39,24 +38,27 @@ import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from datasets import (
+    Dataset,
     DatasetDict,
     IterableDataset,
     IterableDatasetDict,
     concatenate_datasets,
     interleave_datasets,
-    load_dataset, Dataset,
+    load_dataset,
 )
 from huggingface_hub import create_repo, get_full_repo_name, upload_folder
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
-    HfArgumentParser,
-    Seq2SeqTrainingArguments,
     AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
+    BitsAndBytesConfig,
+    HfArgumentParser,
+    PreTrainedTokenizerBase,
+    Seq2SeqTrainingArguments,
     get_scheduler,
-    set_seed, PreTrainedTokenizerBase, BitsAndBytesConfig,
+    set_seed,
 )
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
@@ -129,12 +131,8 @@ class ModelArguments:
             )
         },
     )
-    load_teacher_in_8bit: bool = field(
-        default=False, metadata={"help": "Use 8 bit precision for the teacher model."}
-    )
-    load_teacher_in_4bit: bool = field(
-        default=False, metadata={"help": "Use 4 bit precision for the teacher model."}
-    )
+    load_teacher_in_8bit: bool = field(default=False, metadata={"help": "Use 8 bit precision for the teacher model."})
+    load_teacher_in_4bit: bool = field(default=False, metadata={"help": "Use 4 bit precision for the teacher model."})
 
     bnb_4bit_quant_type: Optional[str] = field(
         default="nf4", metadata={"help": "Quantization type if the teacher is quantized (fp4 or nf4)"}
@@ -284,10 +282,7 @@ class DataTrainingArguments:
 @dataclass
 class DistillationTrainingArguments(Seq2SeqTrainingArguments):
     freeze_lm_head: Optional[bool] = field(
-        default=False,
-        metadata={
-            "help": "Whether to freeze the LM head of the student model."
-        }
+        default=False, metadata={"help": "Whether to freeze the LM head of the student model."}
     )
     temperature: Optional[float] = field(
         default=2.0, metadata={"help": "Temperature to anneal the logits when computing the softmax."}
@@ -302,10 +297,11 @@ class DistillationTrainingArguments(Seq2SeqTrainingArguments):
         },
     )
     output_router_logits: bool = field(
-        default=False, metadata={
+        default=False,
+        metadata={
             "help": "Whether or not to return the router logits in the forward pass. Enabling this will "
-                    "also configure the model to compute the auxiliary loss."
-        }
+            "also configure the model to compute the auxiliary loss."
+        },
     )
     dtype: Optional[str] = field(
         default="float32",
@@ -352,7 +348,7 @@ class DataCollatorCausalLMWithPadding:
 
         # don't include prompts in loss calculation
         for idx in range(len(prompt_lengths)):
-            labels_mask[idx, :prompt_lengths[idx]] = 0
+            labels_mask[idx, : prompt_lengths[idx]] = 0
 
         # replace padding with -100 to ignore loss correctly
         labels = batch["input_ids"].masked_fill(labels_mask.ne(1), -100)
@@ -658,6 +654,7 @@ def get_quantization_config(model_args: ModelArguments, teacher_dtype: torch.dty
         quantization_config = None
 
     return quantization_config
+
 
 def main():
     # 1. Parse input arguments
@@ -1170,7 +1167,9 @@ def main():
 
     def generate_step(batch):
         student_model.eval()
-        output_ids = accelerator.unwrap_model(student_model).generate(**batch, max_length=max_label_length, num_beams=num_beams)
+        output_ids = accelerator.unwrap_model(student_model).generate(
+            **batch, max_length=max_label_length, num_beams=num_beams
+        )
         output_ids = accelerator.pad_across_processes(output_ids, dim=1, pad_index=tokenizer.pad_token_id)
         return output_ids
 
