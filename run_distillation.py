@@ -53,6 +53,7 @@ from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
+    BatchEncoding,
     BitsAndBytesConfig,
     HfArgumentParser,
     PreTrainedTokenizerBase,
@@ -332,7 +333,7 @@ class DataCollatorCausalLMWithPadding:
     target_padding: Union[bool, str] = "max_length"
     max_target_length: Optional[int] = None
 
-    def __call__(self, features: List[Dict[str, Union[List[int], np.ndarray]]]) -> Dict[str, np.ndarray]:
+    def __call__(self, features: List[Dict[str, Union[List[int], np.ndarray]]]) -> BatchEncoding:
         # dataloader returns a list of features which we convert to a dict
         label_features = {"input_ids": [feature["labels"] for feature in features]}
         prompt_lengths = [feature["prompt_length"] for feature in features]
@@ -383,6 +384,8 @@ def log_pred(
     pred_str: List[str],
     label_str: List[str],
     step: int,
+    epoch: int,
+    evaluation_strategy: str,
     prefix: str = "eval",
     num_lines: int = 200000,
 ):
@@ -393,11 +396,16 @@ def log_pred(
         cur_step_pretty = f"{int(step // 1000)}k" if step > 1000 else step
         prefix_pretty = prefix.replace("/", "-")
 
+        if evaluation_strategy == "epoch":
+            table_name = f"predictions/{prefix_pretty}-epoch-{epoch}"
+        else:
+            table_name = f"predictions/{prefix_pretty}-step-{cur_step_pretty}"
+
         # convert str data to a wandb compatible format
         str_data = [[label_str[i], pred_str[i]] for i in range(len(pred_str))]
         # log as a table with the appropriate headers
         wandb_tracker.log_table(
-            table_name=f"predictions/{prefix_pretty}-step-{cur_step_pretty}",
+            table_name=table_name,
             columns=["Target", "Pred"],
             data=str_data[:num_lines],
             step=step,
@@ -1353,6 +1361,8 @@ def main():
                                 pred_str,
                                 label_str,
                                 step=cur_step,
+                                epoch=epochs_trained,
+                                evaluation_strategy=training_args.evaluation_strategy,
                                 prefix=eval_split,
                             )
 
