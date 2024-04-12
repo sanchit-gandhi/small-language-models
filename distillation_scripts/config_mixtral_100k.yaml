@@ -21,7 +21,7 @@ warmup_steps: 500
 gradient_checkpointing: true
 dataloader_num_workers: 4
 preprocessing_num_workers: 16
-save_strategy: no
+save_strategy: epoch
 evaluation_strategy: epoch
 logging_steps: 25
 overwrite_output_dir: true

@@ -1,6 +1,6 @@
 # Model arguments
-model_name_or_path: sanchit-gandhi/mixtral-8x1.5B
-teacher_model_name_or_path: mistralai/Mixtral-8x7B-v0.1
+model_name_or_path: sanchit-gandhi/Mistral-7B-v0.1-6-layer
+teacher_model_name_or_path: mistralai/Mistral-7B-v0.1
 dtype: bfloat16
 load_teacher_in_4bit: true
 
@@ -24,8 +24,8 @@ num_train_epochs: 10
 # Training arguments
 do_train: true
 do_eval: true
-per_device_eval_batch_size: 4
-per_device_train_batch_size: 4
+per_device_eval_batch_size: 16
+per_device_train_batch_size: 16
 learning_rate: 0.0003
 warmup_steps: 500
 gradient_checkpointing: true
