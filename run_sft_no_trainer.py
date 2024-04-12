@@ -217,19 +217,19 @@ class DataTrainingArguments:
         },
     )
     text_column_name: str = field(
-        default="text",
+        default=None,
         metadata={"help": "The name of the dataset column containing the generated text data in the training set."},
     )
     prompt_column_name: str = field(
-        default="prompt",
+        default=None,
         metadata={"help": "The name of the dataset column containing the prompt data. Defaults to 'prompt'"},
     )
     eval_text_column_name: str = field(
-        default="text",
+        default=None,
         metadata={"help": "The name of the dataset column containing the generated text data in the evaluation set."},
     )
     eval_prompt_column_name: str = field(
-        default="prompt",
+        default=None,
         metadata={"help": "The name of the dataset column containing the prompt data in the evaluation set."},
     )
     max_label_length: int = field(
@@ -471,7 +471,7 @@ def convert_dataset_str_to_list(
         text_column_names if text_column_names is not None else ["text" for _ in range(len(dataset_names))]
     )
     prompt_column_names = (
-        prompt_column_names if prompt_column_names is not None else [None for _ in range(len(dataset_names))]
+        prompt_column_names if prompt_column_names is not None else ["prompt" for _ in range(len(dataset_names))]
     )
     splits = splits if splits is not None else [default_split for _ in range(len(dataset_names))]
 
