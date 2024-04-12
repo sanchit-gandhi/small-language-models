@@ -2,20 +2,24 @@ accelerate launch run_distillation.py \
   --model_name_or_path "sanchit-gandhi/mixtral-8x1.5B" \
   --teacher_model_name_or_path "mistralai/Mixtral-8x7B-v0.1" \
   --output_dir "./" \
-  --train_dataset_name "HuggingFaceTB/cosmopedia-100k" \
-  --train_dataset_config_name "default" \
-	--train_split_name "train[:-100]" \
-	--eval_split_name "train[-100:]" \
+  --train_dataset_name "HuggingFaceTB/cosmopedia" \
+  --train_dataset_config_name "auto_math_text+khanacademy+openstax+stanford+stories+websamples_v1+websamples_v2+wikihow" \
+  --eval_dataset_config_name "auto_math_text+khanacademy+openstax+stanford+stories+websamples_v1+websamples_v2+wikihow" \
+	--train_split_name "train[:-1000]+train[:-1000]+train[:-1000]+train[:-1000]+train[:-1000]+train[:-1000]+train[:-1000]+train[:-1000]" \
+	--eval_split_name "train[-1000:]+train[-1000:]+train[-1000:]+train[-1000:]+train[-1000:]+train[-1000:]+train[-1000:]+train[-1000:]" \
 	--do_train \
   --do_eval \
   --num_train_epochs 10 \
   --per_device_eval_batch_size 32 \
   --per_device_train_batch_size 32 \
+  --dataloader_num_workers 4 \
+  --preprocessing_num_workers 16 \
   --save_strategy "no" \
 	--evaluation_strategy "epoch" \
 	--logging_steps 25 \
   --overwrite_output_dir \
   --output_router_logits True \
   --report_to "wandb" \
+  --dtype "bfloat16" \
   --load_teacher_in_4bit \
   --gradient_checkpointing

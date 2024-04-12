@@ -434,6 +434,9 @@ def convert_dataset_str_to_list(
         prompt_column_names = prompt_column_names.split("+") if prompt_column_names is not None else None
         dataset_samples = dataset_samples.split("+") if dataset_samples is not None else None
 
+    if len(dataset_names) == 1 and len(dataset_config_names) > 1:
+        dataset_names = len(dataset_config_names) * dataset_names
+
     # basic checks to ensure we've got the right number of datasets/configs/splits/columns/probs
     if dataset_config_names is not None and len(dataset_names) != len(dataset_config_names):
         raise ValueError(
