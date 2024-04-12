@@ -47,6 +47,7 @@ from datasets import (
     load_dataset,
 )
 from huggingface_hub import create_repo, get_full_repo_name, upload_folder
+from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
@@ -134,11 +135,32 @@ class ModelArguments:
     )
     load_teacher_in_8bit: bool = field(default=False, metadata={"help": "Use 8 bit precision for the teacher model."})
     load_teacher_in_4bit: bool = field(default=False, metadata={"help": "Use 4 bit precision for the teacher model."})
-
+    load_student_in_8bit: bool = field(default=False, metadata={"help": "Use 8 bit precision for the student model."})
+    load_student_in_4bit: bool = field(default=False, metadata={"help": "Use 4 bit precision for the student model."})
     bnb_4bit_quant_type: Optional[str] = field(
         default="nf4", metadata={"help": "Quantization type if the teacher is quantized (fp4 or nf4)"}
     )
     use_bnb_nested_quant: bool = field(default=False, metadata={"help": "Whether or not to use nested quantization."})
+    lora_r: Optional[int] = field(
+        default=16,
+        metadata={"help": "LoRA R value."},
+    )
+    lora_alpha: Optional[int] = field(
+        default=32,
+        metadata={"help": "LoRA alpha."},
+    )
+    lora_dropout: Optional[float] = field(
+        default=0.05,
+        metadata={"help": "LoRA dropout."},
+    )
+    lora_target_modules: Optional[List[str]] = field(
+        default=None,
+        metadata={"help": "LoRA target modules."},
+    )
+    lora_modules_to_save: Optional[List[str]] = field(
+        default=None,
+        metadata={"help": "Model layers to unfreeze & train"},
+    )
 
 
 @dataclass
@@ -147,7 +169,7 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-    train_dataset_name: str = field(
+    train_dataset_name: List[str] = field(
         default=None,
         metadata={
             "help": "The name of the training dataset to use (via the datasets library). Load and combine "
@@ -155,7 +177,7 @@ class DataTrainingArguments:
             "and Common Voice, set `train_dataset_name='librispeech_asr+common_voice'`."
         },
     )
-    train_dataset_config_name: Optional[str] = field(
+    train_dataset_config_name: Optional[List[str]] = field(
         default=None,
         metadata={
             "help": "The configuration name of the training dataset to use (via the datasets library). Load and combine "
@@ -163,7 +185,7 @@ class DataTrainingArguments:
             "match the order of the datasets."
         },
     )
-    train_dataset_samples: str = field(
+    train_dataset_samples: Optional[List[str]] = field(
         default=None,
         metadata={
             "help": "Number of samples in each dataset when loading multiple datasets with streaming mode. "
@@ -172,7 +194,7 @@ class DataTrainingArguments:
             "sample from every dataset is used once per epoch."
         },
     )
-    eval_dataset_name: str = field(
+    eval_dataset_name: Optional[List[str]] = field(
         default=None,
         metadata={
             "help": "The name of the evaluation dataset to use (via the datasets library). Defaults to the training "
@@ -180,7 +202,7 @@ class DataTrainingArguments:
             "ids by a '+' symbol."
         },
     )
-    eval_dataset_config_name: Optional[str] = field(
+    eval_dataset_config_name: Optional[List[str]] = field(
         default=None,
         metadata={
             "help": "The configuration name of the evaluation dataset to use (via the datasets library). Defaults to the "
@@ -256,14 +278,14 @@ class DataTrainingArguments:
             )
         },
     )
-    train_split_name: str = field(
-        default="train",
+    train_split_name: Optional[List[str]] = field(
+        default=lambda: ["train"],
         metadata={
             "help": "The name of the training data set split to use (via the datasets library). Defaults to 'train'"
         },
     )
-    eval_split_name: str = field(
-        default="validation",
+    eval_split_name: Optional[List[str]] = field(
+        default=lambda: ["validation"],
         metadata={
             "help": (
                 "The name of the evaluation data set split to use (via the datasets library). Defaults to 'validation'"
@@ -427,15 +449,18 @@ def convert_dataset_str_to_list(
     function returns a list of dictionaries, one for each dataset.
     """
     if isinstance(dataset_names, str):
-        dataset_names = dataset_names.split("+")
-        dataset_config_names = dataset_config_names.split("+") if dataset_config_names is not None else None
-        splits = splits.split("+") if splits is not None else None
-        text_column_names = text_column_names.split("+") if text_column_names is not None else None
-        prompt_column_names = prompt_column_names.split("+") if prompt_column_names is not None else None
-        dataset_samples = dataset_samples.split("+") if dataset_samples is not None else None
+        dataset_names = [dataset_names]
+        splits = [splits] if splits else None
+        text_column_names = [text_column_names] if text_column_names else None
+        prompt_column_names = [prompt_column_names] if prompt_column_names else None
+    if isinstance(dataset_config_names, str):
+        dataset_config_names = [dataset_config_names]
 
     if len(dataset_names) == 1 and len(dataset_config_names) > 1:
         dataset_names = len(dataset_config_names) * dataset_names
+
+    if isinstance(splits, list) and len(splits) == 1 and len(dataset_config_names) > 1:
+        splits = len(dataset_config_names) * splits
 
     # basic checks to ensure we've got the right number of datasets/configs/splits/columns/probs
     if dataset_config_names is not None and len(dataset_names) != len(dataset_config_names):
@@ -649,22 +674,33 @@ def get_parameter_names(model, forbidden_layer_types, forbidden_module=None):
     return result
 
 
-def get_quantization_config(model_args: ModelArguments, teacher_dtype: torch.dtype) -> Optional[BitsAndBytesConfig]:
+def get_quantization_config(
+    model_args: ModelArguments, teacher_dtype: torch.dtype
+) -> tuple[BitsAndBytesConfig | None, BitsAndBytesConfig | None]:
     if model_args.load_teacher_in_4bit:
-        quantization_config = BitsAndBytesConfig(
+        quantization_config_teacher = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=teacher_dtype,  # For consistency with model weights, we use the same value as `teacher_dtype`
             bnb_4bit_quant_type=model_args.bnb_4bit_quant_type,
             bnb_4bit_use_double_quant=model_args.use_bnb_nested_quant,
         )
     elif model_args.load_teacher_in_8bit:
-        quantization_config = BitsAndBytesConfig(
-            load_in_8bit=True,
-        )
+        quantization_config_teacher = BitsAndBytesConfig(load_in_8bit=True)
     else:
-        quantization_config = None
+        quantization_config_teacher = None
 
-    return quantization_config
+    if model_args.load_student_in_4bit:
+        quantization_config_student = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=model_args.bnb_4bit_quant_type,
+            bnb_4bit_use_double_quant=model_args.use_bnb_nested_quant,
+        )
+    elif model_args.load_student_in_8bit:
+        quantization_config_student = BitsAndBytesConfig(load_in_8bit=True)
+    else:
+        quantization_config_student = None
+
+    return quantization_config_teacher, quantization_config_student
 
 
 def main():
@@ -676,6 +712,10 @@ def main():
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    elif len(sys.argv) == 2 and sys.argv[1].endswith(".yaml"):
+        # If we pass only one argument to the script and it's the path to a yaml file,
+        # let's parse it to get our arguments.
+        model_args, data_args, training_args = parser.parse_yaml_file(yaml_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
@@ -861,6 +901,12 @@ def main():
         revision=model_args.model_revision,
         token=model_args.token,
     )
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    quantization_config_teacher, quantization_config_student = get_quantization_config(
+        model_args, teacher_dtype=teacher_dtype
+    )
 
     # The teacher model can safely be cast to the dtype of training since we don't
     # update the params
@@ -871,6 +917,7 @@ def main():
         low_cpu_mem_usage=True,
         torch_dtype=teacher_dtype,
         attn_implementation=model_args.attn_implementation,
+        quantization_config=quantization_config_teacher,
     )
 
     student_model = AutoModelForCausalLM.from_pretrained(
@@ -882,7 +929,19 @@ def main():
         token=model_args.token,
         low_cpu_mem_usage=True,
         attn_implementation=model_args.attn_implementation,
+        quantization_config=quantization_config_student,
     )
+
+    if quantization_config_student is not None:
+        lora_config = LoraConfig(
+            r=model_args.lora_r,
+            lora_alpha=model_args.lora_alpha,
+            target_modules=model_args.lora_target_modules,
+            lora_dropout=model_args.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        student_model = get_peft_model(student_model, lora_config)
 
     if student_model.generation_config.bos_token_id is None or teacher_model.generation_config.bos_token_id is None:
         raise ValueError(
