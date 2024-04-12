@@ -1,5 +1,6 @@
-python run_sft.py \
+python run_distillation.py \
   --model_name_or_path "sanchit-gandhi/tiny-random-MistralForCausalLM-1-layer" \
+  --teacher_model_name_or_path "sanchit-gandhi/tiny-random-MistralForCausalLM-1-layer" \
   --output_dir "./" \
   --train_dataset_name "HuggingFaceTB/cosmopedia-100k" \
   --train_dataset_config_name "default" \
@@ -16,5 +17,6 @@ python run_sft.py \
 	--evaluation_strategy "epoch" \
 	--logging_steps 1 \
   --overwrite_output_dir \
-  --output_router_logits False \
-  --report_to "wandb"
+  --output_router_logits True \
+  --report_to "wandb" \
+  --load_teacher_in_4bit

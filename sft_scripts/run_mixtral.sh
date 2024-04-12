@@ -1,4 +1,4 @@
-accelerate launch run_sft_no_trainer.py \
+accelerate launch run_distillation.py \
   --model_name_or_path "sanchit-gandhi/mixtral-8x1.5B" \
   --teacher_model_name_or_path "mistralai/Mixtral-8x7B-v0.1" \
   --output_dir "./" \
