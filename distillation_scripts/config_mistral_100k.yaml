@@ -14,8 +14,8 @@ num_train_epochs: 10
 # Training arguments
 do_train: true
 do_eval: true
-per_device_eval_batch_size: 4
-per_device_train_batch_size: 4
+per_device_eval_batch_size: 8
+per_device_train_batch_size: 8
 learning_rate: 0.0003
 warmup_steps: 500
 gradient_checkpointing: true

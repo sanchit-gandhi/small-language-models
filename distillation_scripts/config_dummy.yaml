@@ -3,15 +3,6 @@ model_name_or_path: sanchit-gandhi/tiny-random-MistralForCausalLM-1-layer
 teacher_model_name_or_path: sanchit-gandhi/tiny-random-MistralForCausalLM-1-layer
 dtype: bfloat16
 load_teacher_in_4bit: true
-load_student_in_4bit: true
-lora_target_modules:
-  - q_proj
-  - k_proj
-  - v_proj
-  - o_proj
-  - w1
-  - w2
-  - w3
 
 # Data arguments
 train_dataset_name: HuggingFaceTB/cosmopedia-100k

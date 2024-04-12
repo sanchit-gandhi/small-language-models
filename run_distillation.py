@@ -819,7 +819,7 @@ def main():
             cache_dir=data_args.dataset_cache_dir,
             token=model_args.token,
         )
-        raw_datasets_train_features = list(raw_datasets["train"].features.keys())
+        raw_datasets_train_features = set(raw_datasets["train"].features.keys())
 
     if training_args.do_eval:
         dataset_names_dict = convert_dataset_str_to_list(

@@ -12,20 +12,18 @@ train_dataset_config_name:
   - openstax
   - stanford
   - stories
-  - websamples_v1
-  - websamples_v2
+  - web_samples_v1
+  - web_samples_v2
   - wikihow
-train_split_name:
-  - train[:-1000]
-eval_split_name:
-  - train[-1000:]
+train_split_name: train[:-1000]
+eval_split_name: train[-1000:]
 num_train_epochs: 10
 
 # Training arguments
 do_train: true
 do_eval: true
-per_device_eval_batch_size: 16
-per_device_train_batch_size: 16
+per_device_eval_batch_size: 8
+per_device_train_batch_size: 8
 learning_rate: 0.0003
 warmup_steps: 500
 gradient_checkpointing: true
@@ -34,7 +32,9 @@ preprocessing_num_workers: 16
 save_strategy: epoch
 evaluation_strategy: epoch
 logging_steps: 25
-overwrite_output_dir: true
 output_router_logits: true
 report_to: wandb
 output_dir: ./
+overwrite_output_dir: true
+resume_from_checkpoint: true
+save_total_limit: 1
