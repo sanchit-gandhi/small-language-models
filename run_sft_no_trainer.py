@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Training the Whisper model for sequence to sequence speech recognition via teacher-student distillation.
+Training langauge models Whisper model for conditional language modelling tasks via teacher-student distillation.
 """
 # You can also adapt this script for your own distillation tasks. Pointers for this are left as comments.
 
@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import datasets
 import evaluate
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -43,25 +44,20 @@ from datasets import (
     IterableDatasetDict,
     concatenate_datasets,
     interleave_datasets,
-    load_dataset,
+    load_dataset, Dataset,
 )
 from huggingface_hub import create_repo, get_full_repo_name, upload_folder
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
-    AddedToken,
     HfArgumentParser,
     Seq2SeqTrainingArguments,
-    WhisperConfig,
-    WhisperFeatureExtractor,
-    WhisperForConditionalGeneration,
-    WhisperProcessor,
-    WhisperTokenizerFast,
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
     get_scheduler,
-    set_seed,
+    set_seed, PreTrainedTokenizerBase,
 )
-from transformers.modeling_outputs import BaseModelOutput
-from transformers.models.whisper.english_normalizer import BasicTextNormalizer, EnglishTextNormalizer
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
@@ -93,10 +89,6 @@ class ModelArguments:
     tokenizer_name: Optional[str] = field(
         default=None,
         metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"},
-    )
-    feature_extractor_name: Optional[str] = field(
-        default=None,
-        metadata={"help": "feature extractor name or path if not the same as model_name"},
     )
     cache_dir: Optional[str] = field(
         default=None,
@@ -137,15 +129,6 @@ class ModelArguments:
             )
         },
     )
-
-    def __post_init__(self):
-        if self.attn_implementation not in [None, "eager", "sdpa", "flash_attention_2"]:
-            raise ValueError(
-                f"Got `--attn_implementation={self.attn_implementation}`, which is an invalid attention type. Should be one of:\n"
-                "1. `eager` or `None`: default Transformers attention implementation.\n"
-                "2. `sdpa`: Flash Attention through PyTorch SDPA. Requires `torch>=2.1`. Recommended for hardware where Flash Attention 2 is not supported, e.g. Turing GPUs, (T4, RTX 2080).\n"
-                "3. `flash_attn_2`: Flash Attention 2 through the Flash Attention package https://github.com/Dao-AILab/flash-attention. **Always** recommended on supported hardware (Ampere, Ada, or Hopper GPUs, e.g., A100, RTX 3090, RTX 4090, H100)."
-            )
 
 
 @dataclass
@@ -206,10 +189,6 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "The number of processes to use for the preprocessing if using non-streaming mode."},
     )
-    preprocessing_batch_size: Optional[int] = field(
-        default=256,
-        metadata={"help": "Number of examples per batch provided to the `prepare_dataset` function."},
-    )
     max_train_samples: Optional[int] = field(
         default=None,
         metadata={
@@ -226,37 +205,33 @@ class DataTrainingArguments:
             )
         },
     )
-    audio_column_name: str = field(
-        default="audio",
-        metadata={"help": "The name of the dataset column containing the audio data. Defaults to 'audio'"},
-    )
     text_column_name: str = field(
-        default=None,
-        metadata={"help": "The name of the dataset column containing the text data in the training set."},
+        default="text",
+        metadata={"help": "The name of the dataset column containing the generated text data in the training set."},
+    )
+    prompt_column_name: str = field(
+        default="prompt",
+        metadata={"help": "The name of the dataset column containing the prompt data. Defaults to 'prompt'"},
     )
     eval_text_column_name: str = field(
         default="text",
-        metadata={"help": ("The name of the dataset column containing the text data in the evaluation set.")},
+        metadata={"help": "The name of the dataset column containing the generated text data in the evaluation set."},
     )
-    max_duration_in_seconds: float = field(
-        default=30.0,
-        metadata={"help": "Filter audio files that are longer than `max_duration_in_seconds` seconds"},
-    )
-    min_duration_in_seconds: float = field(
-        default=0.0,
-        metadata={"help": "Filter audio files that are shorter than `min_duration_in_seconds` seconds"},
+    eval_prompt_column_name: str = field(
+        default="text",
+        metadata={"help": "The name of the dataset column containing the prompt data in the evaluation set."},
     )
     max_label_length: int = field(
-        default=448,
-        metadata={"help": "Truncate transcriptions that are longer `max_label_length` tokens."},
+        default=2048,
+        metadata={"help": "Truncate target labels that are longer `max_label_length` tokens."},
     )
     pad_target_to_multiple_of: Optional[int] = field(
         default=None,
         metadata={
             "help": (
-                "If set will pad the target sequence to a multiple of the provided"
-                " value. This is important to avoid triggering recompilations on TPU."
-                " If unspecified, will default to padding the targets to max length."
+                "If set will pad the target sequence to a multiple of the provided value. This is important to "
+                "avoid triggering recompilations when using torch compile. If unspecified, will default to padding "
+                "the targets to max length."
             )
         },
     )
@@ -264,12 +239,10 @@ class DataTrainingArguments:
         default=False,
         metadata={
             "help": (
-                "Whether to only do data preprocessing and skip training. This is"
-                " especially useful when data preprocessing errors out in distributed"
-                " training due to timeout. In this case, one should run the"
-                " preprocessing in a non-distributed setup with"
-                " `preprocessing_only=True` so that the cached datasets can"
-                " consequently be loaded in distributed training"
+                "Whether to only do data preprocessing and skip training. This is especially useful when data "
+                "preprocessing errors out in distributed training due to timeout. In this case, one should run the "
+                "preprocessing in a non-distributed setup with `preprocessing_only=True` so that the cached datasets "
+                "can consequently be loaded in distributed training"
             )
         },
     )
@@ -288,71 +261,22 @@ class DataTrainingArguments:
         },
     )
     streaming: bool = field(
-        default=True,
+        default=False,
         metadata={"help": "Whether to use Datasets' streaming mode to load and pre-process the data."},
     )
-    wer_threshold: float = field(
-        default=None,
-        metadata={
-            "help": "Filter training data with Whisper transcriptions that have greater than `wer_threshold` "
-            "WER with the normalised transcriptions. This only takes effect if training on pseudo-labels targets."
-            "If `--use_pseudo_labels=False`, then no WER filtering is performed, since we train directly on the text"
-            "transcriptions."
-        },
-    )
-    use_pseudo_labels: bool = field(
-        default=True,
-        metadata={
-            "help": "Whether or not to use pseudo-label transcriptions as the targets. If True, the pseudo-labels "
-            "must be in the dataset column `whisper_transcript` from the previous pseudo-labelling step. This is "
-            "not currently yet configurable."
-        },
-    )
-    timestamp_probability: float = field(
-        default=0.2, metadata={"help": "Probability for training on timestamped tokens if the data contains it."}
-    )
-    condition_on_prev_probability: float = field(
-        default=0.2, metadata={"help": "Probability for conditioning on the previous text example."}
-    )
-    return_timestamps: bool = field(
-        default=False, metadata={"help": "Whether or not to predict timestamps in the generation step."}
-    )
-    language: str = field(
-        default=None,
-        metadata={
-            "help": (
-                "Language for multilingual distillation. This argument should be set for multilingual distillation "
-                "only. For English speech recognition, it should be left as `None`."
-            )
-        },
-    )
-    task: str = field(
-        default="transcribe",
-        metadata={
-            "help": "Task, either `transcribe` for speech recognition or `translate` for speech translation."
-            "This argument should be set for multilingual distillation only. For English speech recognition, it should be left as `None`."
-        },
-    )
     wandb_project: str = field(
-        default="distil-whisper",
+        default="distil-mixtral",
         metadata={"help": "The name of the wandb project."},
     )
 
 
 @dataclass
 class DistillationTrainingArguments(Seq2SeqTrainingArguments):
-    freeze_encoder: Optional[bool] = field(
+    freeze_lm_head: Optional[bool] = field(
         default=False,
         metadata={
-            "help": (
-                "Whether to freeze the entire encoder model. Only recommended when the entire encoder has been "
-                "copied from the teacher model."
-            )
-        },
-    )
-    freeze_embed_positions: Optional[bool] = field(
-        default=False,
-        metadata={"help": "Whether to freeze the decoder embedding positions."},
+            "help": "Whether to freeze the LM head of the student model."
+        }
     )
     temperature: Optional[float] = field(
         default=2.0, metadata={"help": "Temperature to anneal the logits when computing the softmax."}
@@ -378,25 +302,14 @@ class DistillationTrainingArguments(Seq2SeqTrainingArguments):
 
 
 @dataclass
-class DataCollatorSpeechSeq2SeqWithPadding:
+class DataCollatorCausalLMWithPadding:
     """
     Data collator that will dynamically pad the inputs received.
     Args:
-        processor ([`Wav2Vec2Processor`])
-            The processor used for proccessing the data.
+        tokenizer ([`PreTrainedTokenizer`])
+            The tokenizer used for tokenizing the data.
         decoder_start_token_id (:obj: `int`)
             The start-of-sequence token id of the decoder.
-        decoder_prev_token_id (:obj: `int`)
-            The start-of-prompt token id of the decoder
-        input_padding (:obj:`bool`, :obj:`str` or :class:`~transformers.tokenization_utils_base.PaddingStrategy`, `optional`, defaults to :obj:`True`):
-            Select a strategy to pad the returned input sequences (according to the model's padding side and padding index)
-            among:
-            * :obj:`True` or :obj:`'longest'`: Pad to the longest sequence in the batch (or no padding if only a single
-              sequence if provided).
-            * :obj:`'max_length'`: Pad to a maximum length specified with the argument :obj:`max_length` or to the
-              maximum acceptable input length for the model if that argument is not provided.
-            * :obj:`False` or :obj:`'do_not_pad'` (default): No padding (i.e., can output a batch with sequences of
-              different lengths).
         target_padding (:obj:`bool`, :obj:`str` or :class:`~transformers.tokenization_utils_base.PaddingStrategy`, `optional`, defaults to :obj:`True`):
             Select a strategy to pad the returned target sequences (according to the model's padding side and padding index).
             See above for details.
@@ -404,29 +317,17 @@ class DataCollatorSpeechSeq2SeqWithPadding:
             Maximum length of the ``labels`` of the returned list and optionally padding length (see above).
     """
 
-    processor: Any
+    tokenizer: PreTrainedTokenizerBase
     decoder_start_token_id: int
-    decoder_prev_token_id: int
-    input_padding: Union[bool, str] = "max_length"
     target_padding: Union[bool, str] = "max_length"
     max_target_length: Optional[int] = None
 
     def __call__(self, features: List[Dict[str, Union[List[int], np.ndarray]]]) -> Dict[str, np.ndarray]:
-        # split inputs and labels since they have to be of different lengths and need
-        # different padding methods
-
         # dataloader returns a list of features which we convert to a dict
-        input_features = {"input_features": [feature["input_features"] for feature in features]}
         label_features = {"input_ids": [feature["labels"] for feature in features]}
+        prompt_lengths = [feature["prompt_length"] for feature in features]
 
-        # reformat list to dict and set to pytorch format
-        batch = self.processor.feature_extractor.pad(
-            input_features,
-            padding=self.input_padding,
-            return_tensors="pt",
-        )
-
-        labels_batch = self.processor.tokenizer.pad(
+        labels_batch = self.tokenizer.pad(
             label_features,
             max_length=self.max_target_length,
             padding=self.target_padding,
@@ -435,21 +336,27 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
         # shift labels to the right to get decoder input ids
         labels = labels_batch["input_ids"]
-        decoder_input_ids = labels[:, :-1]
-        labels = labels[:, 1:]
-        labels_mask = labels_batch.attention_mask[:, 1:]
 
-        # replace padding with -100 to ignore correctly when computing the loss
+        batch = {
+            "input_ids": labels[:, :-1],
+            "attention_mask": labels_batch.attention_mask[:, :-1],
+        }
+
+        labels_mask = labels_batch.attention_mask
+        # don't include prompts in loss calculation
+        for idx in range(len(prompt_lengths)):
+            labels_mask[idx, :prompt_lengths[idx]] = 0
+
+        # if bos token is appended in previous tokenization step,
+        # cut bos token here as it's append later anyways
+        if (labels[:, 0] == self.decoder_start_token_id).all().cpu().item():
+            labels = labels[:, 1:]
+            labels_mask = labels_mask[:, 1:]
+
+        # replace padding with -100 to ignore loss correctly
         labels = labels.masked_fill(labels_mask.ne(1), -100)
 
-        # replace initial prompt tokens with -100 to ignore correctly when computing the loss
-        bos_index = torch.argmax((labels == self.decoder_start_token_id).long(), dim=1)
-        bos_index = torch.where(bos_index > 0, bos_index + 1, bos_index)
-        prompt_mask = torch.arange(labels.shape[1]) < bos_index[:, None]
-        labels = torch.where(prompt_mask, -100, labels)
-
         batch["labels"] = labels
-        batch["decoder_input_ids"] = decoder_input_ids
 
         return batch
 
@@ -478,8 +385,6 @@ def log_pred(
     accelerator,
     pred_str: List[str],
     label_str: List[str],
-    norm_pred_str: List[str],
-    norm_label_str: List[str],
     step: int,
     prefix: str = "eval",
     num_lines: int = 200000,
@@ -492,23 +397,12 @@ def log_pred(
         prefix_pretty = prefix.replace("/", "-")
 
         # convert str data to a wandb compatible format
-        str_data = [[label_str[i], pred_str[i], norm_label_str[i], norm_pred_str[i]] for i in range(len(pred_str))]
+        str_data = [[label_str[i], pred_str[i]] for i in range(len(pred_str))]
         # log as a table with the appropriate headers
         wandb_tracker.log_table(
             table_name=f"predictions/{prefix_pretty}-step-{cur_step_pretty}",
-            columns=["Target", "Pred", "Norm Target", "Norm Pred"],
+            columns=["Target", "Pred"],
             data=str_data[:num_lines],
-            step=step,
-        )
-
-        # log incorrect normalised predictions
-        str_data = np.asarray(str_data)
-        str_data_incorrect = str_data[str_data[:, -2] != str_data[:, -1]]
-        # log as a table with the appropriate headers
-        wandb_tracker.log_table(
-            table_name=f"incorrect_predictions/{prefix_pretty}-step-{cur_step_pretty}",
-            columns=["Target", "Pred", "Norm Target", "Norm Pred"],
-            data=str_data_incorrect[:num_lines],
             step=step,
         )
 
@@ -518,6 +412,7 @@ def convert_dataset_str_to_list(
     dataset_config_names,
     splits=None,
     text_column_names=None,
+    prompt_column_names=None,
     dataset_samples=None,
     default_split="train",
 ) -> List[Dict]:
@@ -531,6 +426,7 @@ def convert_dataset_str_to_list(
         dataset_config_names = dataset_config_names.split("+") if dataset_config_names is not None else None
         splits = splits.split("+") if splits is not None else None
         text_column_names = text_column_names.split("+") if text_column_names is not None else None
+        prompt_column_names = prompt_column_names.split("+") if prompt_column_names is not None else None
         dataset_samples = dataset_samples.split("+") if dataset_samples is not None else None
 
     # basic checks to ensure we've got the right number of datasets/configs/splits/columns/probs
@@ -551,6 +447,12 @@ def convert_dataset_str_to_list(
             f" {len(text_column_names)} text column names."
         )
 
+    if prompt_column_names is not None and len(prompt_column_names) != len(dataset_names):
+        raise ValueError(
+            f"Ensure one prompt column name is passed for each dataset, got {len(dataset_names)} datasets and"
+            f" {len(prompt_column_names)} prompt column names."
+        )
+
     if dataset_samples is not None:
         if len(dataset_samples) != len(dataset_names):
             raise ValueError(
@@ -567,6 +469,9 @@ def convert_dataset_str_to_list(
     text_column_names = (
         text_column_names if text_column_names is not None else ["text" for _ in range(len(dataset_names))]
     )
+    prompt_column_names = (
+        prompt_column_names if prompt_column_names is not None else [None for _ in range(len(dataset_names))]
+    )
     splits = splits if splits is not None else [default_split for _ in range(len(dataset_names))]
 
     dataset_names_dict = []
@@ -577,6 +482,7 @@ def convert_dataset_str_to_list(
                 "config": dataset_config_names[i],
                 "split": splits[i],
                 "text_column_name": text_column_names[i],
+                "prompt_column_name": prompt_column_names[i],
                 "samples": dataset_samples[i],
             }
         )
@@ -588,17 +494,16 @@ def load_multiple_datasets(
     dataset_config_names: Union[List, str],
     splits: Optional[Union[List, str]] = None,
     text_column_names: Optional[List] = None,
-    sampling_rate: Optional[int] = 16000,
+    prompt_column_names: Optional[List] = None,
     stopping_strategy: Optional[str] = "first_exhausted",
     dataset_samples: Optional[Union[List, np.array]] = None,
-    streaming: Optional[bool] = True,
+    streaming: Optional[bool] = False,
     seed: Optional[int] = None,
     accelerator: Optional[Accelerator] = None,
-    use_pseudo_labels: float = None,
     **kwargs,
-) -> IterableDataset:
+) -> Union[Dataset, IterableDataset]:
     dataset_names_dict = convert_dataset_str_to_list(
-        dataset_names, dataset_config_names, splits, text_column_names, dataset_samples
+        dataset_names, dataset_config_names, splits, text_column_names, prompt_column_names, dataset_samples
     )
 
     if dataset_samples is not None:
@@ -612,7 +517,7 @@ def load_multiple_datasets(
     for dataset_dict in tqdm(
         dataset_names_dict,
         desc="Combining datasets...",
-        disable=not accelerator.is_local_main_process if accelerator is not None else False,
+        disable=not accelerator.is_main_process,
     ):
         dataset = load_dataset(
             dataset_dict["name"],
@@ -621,10 +526,9 @@ def load_multiple_datasets(
             streaming=streaming,
             **kwargs,
         )
-        # resample to specified sampling rate
-        dataset = dataset.cast_column("audio", datasets.features.Audio(sampling_rate))
+
+        columns_to_keep = {"text"}
         dataset_features = dataset.features.keys()
-        columns_to_keep = {"audio", "text"}
 
         if dataset_dict["text_column_name"] not in dataset_features:
             raise ValueError(
@@ -637,19 +541,18 @@ def load_multiple_datasets(
         if dataset_dict["text_column_name"] != "text":
             dataset = dataset.rename_column(dataset_dict["text_column_name"], "text")
 
-        if use_pseudo_labels:
-            if "whisper_transcript" not in dataset_features:
+        # blanket renaming of all prompt columns to prompt
+        if dataset_dict["prompt_column_name"] is not None:
+            if dataset_dict["prompt_column_name"] not in dataset_features:
                 raise ValueError(
-                    f"Pseudo-label column `whisper_transcript` not found in dataset {dataset_dict['name']}. Ensure"
-                    "pseudo-labels are present in the dataset under this column name, or train directly on the text "
-                    "labels by setting `--use_pseudo_labels=False` and defining the appropriate `--text_column_name`."
+                    f"Prompt column name {dataset_dict['prompt_column_name']} not found in dataset"
+                    f" '{dataset_dict['name']}'. Make sure to set `--prompt_column_name` to the"
+                    f" correct prompt column - one of {', '.join(dataset_features)}."
                 )
-            columns_to_keep.add("whisper_transcript")
+            elif dataset_dict["prompt_column_name"] != "prompt":
+                dataset = dataset.rename_column(dataset_dict["prompt_column_name"], "prompt")
+            columns_to_keep.add("prompt")
 
-        if "condition_on_prev" in dataset_features:
-            columns_to_keep.add("condition_on_prev")
-
-        dataset_features = dataset.features.keys()
         dataset = dataset.remove_columns(set(dataset_features - columns_to_keep))
         all_datasets.append(dataset)
 
@@ -842,7 +745,7 @@ def main():
             data_args.train_dataset_config_name,
             splits=data_args.train_split_name,
             text_column_names=data_args.text_column_name,
-            use_pseudo_labels=data_args.use_pseudo_labels,
+            prompt_column_names=data_args.prompt_column_name,
             streaming=data_args.streaming,
             dataset_samples=data_args.train_dataset_samples,
             seed=training_args.seed,
@@ -862,6 +765,7 @@ def main():
             ),
             splits=data_args.eval_split_name,
             text_column_names=data_args.eval_text_column_name,
+            prompt_column_names=data_args.eval_prompt_column_name,
         )
         all_eval_splits = []
         if len(dataset_names_dict) == 1:
@@ -878,6 +782,8 @@ def main():
             )
             if data_args.eval_text_column_name != "text":
                 raw_datasets["eval"] = raw_datasets["eval"].rename_column(data_args.eval_text_column_name, "text")
+            if data_args.eval_prompt_column_name != "prompt":
+                raw_datasets["eval"] = raw_datasets["eval"].rename_column(data_args.eval_prompt_column_name, "prompt")
         else:
             # load multiple eval sets
             for dataset_dict in dataset_names_dict:
@@ -900,8 +806,12 @@ def main():
                     raw_datasets[pretty_name] = raw_datasets[pretty_name].rename_column(
                         dataset_dict["text_column_name"], "text"
                     )
+                if dataset_dict["prompt_column_name"] != "prompt":
+                    raw_datasets[pretty_name] = raw_datasets[pretty_name].rename_column(
+                        dataset_dict["prompt_column_name"], "prompt"
+                    )
                 raw_datasets[pretty_name] = raw_datasets[pretty_name].remove_columns(
-                    set(raw_datasets[pretty_name].features.keys()) - {"audio", "text"}
+                    set(raw_datasets[pretty_name].features.keys()) - {"text", "prompt"}
                 )
 
     if not training_args.do_train and not training_args.do_eval:
@@ -910,19 +820,13 @@ def main():
         )
 
     # 7. Load pretrained model, tokenizer, and feature extractor
-    config = WhisperConfig.from_pretrained(
+    config = AutoConfig.from_pretrained(
         (model_args.config_name if model_args.config_name else model_args.model_name_or_path),
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         token=model_args.token,
     )
-    feature_extractor = WhisperFeatureExtractor.from_pretrained(
-        (model_args.feature_extractor_name if model_args.feature_extractor_name else model_args.model_name_or_path),
-        cache_dir=model_args.cache_dir,
-        revision=model_args.model_revision,
-        token=model_args.token,
-    )
-    tokenizer = WhisperTokenizerFast.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         (model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path),
         cache_dir=model_args.cache_dir,
         use_fast=model_args.use_fast_tokenizer,
@@ -930,13 +834,9 @@ def main():
         token=model_args.token,
     )
 
-    # override timestamp tokens until tokenizer issues are fixed in transformers
-    timestamps = [AddedToken("<|%.2f|>" % (i * 0.02), lstrip=False, rstrip=False) for i in range(1500 + 1)]
-    tokenizer.add_tokens(timestamps)
-
     # The teacher model can safely be cast to the dtype of training since we don't
     # update the params
-    teacher_model = WhisperForConditionalGeneration.from_pretrained(
+    teacher_model = AutoModelForCausalLM.from_pretrained(
         model_args.teacher_model_name_or_path,
         cache_dir=model_args.cache_dir,
         token=model_args.token,
@@ -945,7 +845,7 @@ def main():
         attn_implementation=model_args.attn_implementation,
     )
 
-    student_model = WhisperForConditionalGeneration.from_pretrained(
+    student_model = AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         config=config,
         cache_dir=model_args.cache_dir,
@@ -972,94 +872,37 @@ def main():
             param.requires_grad = requires_grad
         module._requires_grad = requires_grad
 
-    # freeze student encoder if necessary
-    if training_args.freeze_encoder:
-        set_trainable_parameters(student_model.model.encoder, requires_grad=False)
-        student_model.model.encoder.gradient_checkpointing = False
-
-    if training_args.freeze_embed_positions:
-        # set_trainable_parameters(student_model.model.decoder.embed_tokens, requires_grad=False)
-        set_trainable_parameters(student_model.model.decoder.embed_positions, requires_grad=False)
-        if student_model.model.decoder.gradient_checkpointing:
-            logger.info(
-                "Disabling gradient checkpointing in the decoder since it's incompatible with `freeze_embed_positions`."
+    # freeze student lm head if necessary
+    if training_args.freeze_lm_head:
+        set_trainable_parameters(student_model.lm_head, requires_grad=False)
+        if training_args.gradient_checkpointing:
+            # TODO(SG): possibly upgrade this to an error
+            logger.warning(
+                "Freezing the LM head is not compatible with gradient checkpointing. Set `--gradient_checkpointing=False`, "
+                "or un-freeze the LM head with `--freeze_lm_head=False`."
             )
 
-    share_hidden_states = training_args.freeze_encoder and student_model.config.d_model == teacher_model.config.d_model
-    if share_hidden_states:
-        # tie the weights for the teacher encoder if we're freezing the student and it's the same as the teacher
-        teacher_model.model.encoder = student_model.model.encoder
+    student_model.generation_config.update({"max_length": data_args.max_label_length})
 
-    if hasattr(teacher_model.generation_config, "is_multilingual") and teacher_model.generation_config.is_multilingual:
-        # We need to set the language and task ids for previously multilingual checkpoints
-        is_multilingual = True
-        tokenizer.set_prefix_tokens(language=data_args.language, task=data_args.task, predict_timestamps=False)
-        student_model.generation_config.update(
-            **{
-                "language": data_args.language,
-                "task": data_args.task,
-            }
-        )
-    elif data_args.language is not None:
-        raise ValueError(
-            "Setting language token for an English-only checkpoint is not permitted. The language argument should "
-            "only be set for multilingual checkpoints."
-        )
-    else:
-        is_multilingual = False
-
-    # 8. Create a single speech processor - make sure all processes wait until data is saved
+    # 8. Save all pre-processed tokenizers/config/generation configs
     if accelerator.is_main_process:
-        feature_extractor.save_pretrained(training_args.output_dir)
         tokenizer.save_pretrained(training_args.output_dir)
         # save the config and generation config as well
         config.save_pretrained(training_args.output_dir)
         student_model.generation_config.save_pretrained(training_args.output_dir)
 
     accelerator.wait_for_everyone()
-    processor = WhisperProcessor.from_pretrained(training_args.output_dir)
 
-    # 9. Resample speech dataset: `datasets` takes care of automatically loading and resampling the audio,
-    # so we just need to set the correct target sampling rate.
-    sampling_rate = feature_extractor.sampling_rate
-    raw_datasets = raw_datasets.cast_column(
-        data_args.audio_column_name,
-        datasets.features.Audio(sampling_rate=sampling_rate),
-    )
-
-    # 10. Preprocessing the datasets: we need to read the audio files as arrays and tokenize the targets.
+    # 10. Preprocessing the datasets: we need to combine the prompt and generations and tokenize the targets.
     # 10.1: Define the pre-processing constants
-    max_input_length = int(data_args.max_duration_in_seconds * sampling_rate)
-    min_input_length = int(data_args.min_duration_in_seconds * sampling_rate)
     max_label_length = (
         data_args.max_label_length if data_args.max_label_length is not None else student_model.config.max_length
     )
-
-    timestamp_probability = data_args.timestamp_probability
-    condition_on_prev_probability = data_args.condition_on_prev_probability
-    return_timestamps = data_args.return_timestamps if timestamp_probability > 0 else False
-
-    timestamp_ids = tokenizer.timestamp_ids()
-    timestamp_begin = tokenizer.all_special_ids[-1]
-    timestamp_position = 3 if is_multilingual else 1
-
-    decoder_start_token_id = student_model.config.decoder_start_token_id  # <|startoftranscript|>
-    decoder_prev_token_id = tokenizer.all_special_ids[-3]  # <|startofprev|>
-    prompt_cutoff_length = max_label_length // 2
-
     num_workers = data_args.preprocessing_num_workers
     dataloader_num_workers = training_args.dataloader_num_workers
     prefetch_factor = training_args.dataloader_prefetch_factor
-
-    metric = evaluate.load("wer")
-    normalizer = (
-        BasicTextNormalizer()
-        if data_args.language is not None
-        else EnglishTextNormalizer(tokenizer.english_spelling_normalizer)
-    )
-    wer_threshold = data_args.wer_threshold
-    use_pseudo_labels = data_args.use_pseudo_labels
-    train_text_column_name = "whisper_transcript" if use_pseudo_labels else "text"
+    decoder_start_token_id = student_model.config.decoder_start_token_id
+    eos_token_id = tokenizer.eos_token_id
 
     # 10.2: filter based on maximum number of training/evaluation samples
     if training_args.do_train and data_args.max_train_samples is not None:
@@ -1077,110 +920,13 @@ def main():
                 else raw_datasets[eval_split].select(range(data_args.max_eval_samples))
             )
 
-    # 10.3: filter training data based on WER threshold -> this is KEY to good distillation performance
-    def is_wer_in_range(ground_truth, whisper_transcript):
-        norm_ground_truth = normalizer(ground_truth)
-        if whisper_transcript is not None and whisper_transcript.upper() == whisper_transcript:
-            # filter entirely upper-case transcriptions: these are erroneous generations from large-v3
-            return False
-        elif len(norm_ground_truth) > 0 and whisper_transcript is not None:
-            norm_whisper_transcript = normalizer(whisper_transcript)
-            wer = 100 * metric.compute(predictions=[norm_whisper_transcript], references=[norm_ground_truth])
-            return wer < wer_threshold
-        else:
-            # filter automatically since we can't know the WER
-            return False
-
-    filter_by_wer_threshold = partial(
-        raw_datasets["train"].filter,
-        function=is_wer_in_range,
-        input_columns=["text", "whisper_transcript"],
-    )
-
-    if wer_threshold is not None and use_pseudo_labels:
-        with accelerator.main_process_first():
-            raw_datasets["train"] = (
-                filter_by_wer_threshold(num_proc=num_workers, desc="filtering train dataset by wer")
-                if not data_args.streaming
-                else filter_by_wer_threshold()
-            )
-
     # 10.4: pre-process training/evaluation datasets
-    def prepare_train_dataset(batch):
-        """
-        Pre-process the raw dataset in a three stage process:
-            1. Convert the audio arrays to log-mel spectrogram inputs
-            2. Possibly filter the timestamp tokens from the token ids (depending on the timestamp probability)
-            3. Possibly add prompt tokens if conditioning on previous text (depending on the conditioning probability)
-        """
-        # process audio input
-        audio = [sample["array"] for sample in batch["audio"]]
-        inputs = feature_extractor(audio, sampling_rate=sampling_rate)
-        batch["input_features"] = inputs.input_features
-        batch["input_length"] = [len(sample) for sample in audio]
-
-        # process text targets - for training these are the Whisper-generated pseudo-labels
-        input_str_batched = batch[train_text_column_name]
-        condition_on_prev_batched = batch.get("condition_on_prev", len(input_str_batched) * [None])
-
-        all_token_ids = []
-        all_token_ids_unprompted = []
-        for prev_ids, input_str in zip(condition_on_prev_batched, input_str_batched):
-            token_ids = tokenizer(input_str, add_special_tokens=not use_pseudo_labels).input_ids
-
-            # check whether we have timestamps in the PLs and filter if required
-            has_timestamps = len(set(token_ids) & set(timestamp_ids)) > 0
-            if has_timestamps:
-                # sample from binomial distribution to get probability of training on timestamps
-                predict_timestamps = bool(np.random.binomial(1, timestamp_probability))
-                if not predict_timestamps:
-                    # filter timestamps and insert the <|notimestamps|> task token
-                    token_ids = [token for token in token_ids if token < timestamp_begin]
-                    token_ids.insert(timestamp_position, timestamp_begin)
-
-            all_token_ids_unprompted.append(token_ids)
-            # check whether to condition on previous text - we do this with probability condition_on_prev_probability
-            condition_on_prev = bool(np.random.binomial(1, condition_on_prev_probability))
-            if not condition_on_prev:
-                prev_ids = None
-            elif "condition_on_prev" not in batch and len(all_token_ids_unprompted) > 1:
-                # prompt ids are the penultimate token ids in the batch
-                prev_ids = all_token_ids_unprompted[-2]
-
-            if prev_ids is not None:
-                if has_timestamps and not predict_timestamps:
-                    # filter timestamp ids from prompt when not predicting timestamps
-                    prev_ids = [token for token in prev_ids if token < timestamp_begin]
-
-                # check that the length of the prompt does not exceed more than half the max label length (224)
-                if len(prev_ids) > prompt_cutoff_length:
-                    prev_ids = prev_ids[-prompt_cutoff_length + 1 :]
-                    prev_ids = [decoder_prev_token_id] + prev_ids
-
-                # and that the total length of the labels does not exceed the max label length (448)
-                if len(prev_ids + token_ids) > max_label_length:
-                    trim_length = len(prev_ids + token_ids) - max_label_length + 1
-                    prev_ids = prev_ids[trim_length:]
-                    prev_ids = [decoder_prev_token_id] + prev_ids
-
-                token_ids = prev_ids + token_ids
-
-            all_token_ids.append(token_ids)
-
-        batch["labels"] = all_token_ids
-        return batch
-
-    def prepare_eval_dataset(batch):
-        # process audio input
-        sample = batch["audio"]
-        inputs = feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
-        batch["input_features"] = inputs.input_features[0]
-        batch["input_length"] = len(sample["array"])
-
-        # process targets - for evaluation these are the ground-truth transcriptions
-        input_str = batch["text"]
-        batch["labels"] = tokenizer(input_str).input_ids
-        return batch
+    def prepare_datasets(example):
+        prompt_ids = tokenizer(example["prompt"]).input_ids
+        gen_ids = tokenizer(example["text"], add_special_tokens=False).input_ids + [eos_token_id]
+        example["labels"] = prompt_ids + gen_ids
+        example["prompt_length"] = len(prompt_ids)
+        return example
 
     vectorized_datasets = IterableDatasetDict() if data_args.streaming else DatasetDict()
     if training_args.do_train:
@@ -1189,10 +935,8 @@ def main():
         # We gate the pre-processing function accordingly
         map_fn_train = partial(
             raw_datasets["train"].map,
-            function=prepare_train_dataset,
+            function=prepare_datasets,
             remove_columns=raw_datasets_train_features,
-            batched=True,
-            batch_size=data_args.preprocessing_batch_size,
         )
         with accelerator.main_process_first():
             vectorized_datasets["train"] = (
@@ -1204,7 +948,7 @@ def main():
         for eval_split in all_eval_splits:
             raw_datasets_eval_features = list(raw_datasets[eval_split].features.keys())
             map_fn_eval = partial(
-                raw_datasets[eval_split].map, function=prepare_eval_dataset, remove_columns=raw_datasets_eval_features
+                raw_datasets[eval_split].map, function=prepare_datasets, remove_columns=raw_datasets_eval_features
             )
             with accelerator.main_process_first():
                 vectorized_datasets[eval_split] = (
@@ -1212,20 +956,6 @@ def main():
                     if not data_args.streaming
                     else map_fn_eval()
                 )
-
-    # 10.5: Filter training data with inputs longer than `max_input_length`
-    def is_audio_in_length_range(length):
-        return min_input_length < length < max_input_length
-
-    filter_by_audio_fn = partial(
-        vectorized_datasets.filter, function=is_audio_in_length_range, input_columns=["input_length"]
-    )
-    with accelerator.main_process_first():
-        vectorized_datasets = (
-            filter_by_audio_fn(num_proc=num_workers, desc="filtering train dataset by audio length")
-            if not data_args.streaming
-            else filter_by_audio_fn()
-        )
 
     # 10.6: Filter training data with labels longer than `max_label_length`
     def is_labels_in_length_range(labels):
@@ -1260,27 +990,13 @@ def main():
 
     # 11. Define Evaluation Metrics
     def compute_metrics(preds, labels):
+        # TODO(SG): better metrics for performance?
         # replace padded labels by the padding token
         for idx in range(len(labels)):
             labels[idx][labels[idx] == -100] = tokenizer.pad_token_id
-
-        pred_str = tokenizer.batch_decode(preds, skip_special_tokens=True, decode_with_timestamps=return_timestamps)
-        # we do not want to group tokens when computing the metrics
+        pred_str = tokenizer.batch_decode(preds, skip_special_tokens=True)
         label_str = tokenizer.batch_decode(labels, skip_special_tokens=True)
-        wer_ortho = 100 * metric.compute(predictions=pred_str, references=label_str)
-
-        # normalize everything and re-compute the WER
-        norm_pred_str = [normalizer(pred) for pred in pred_str]
-        norm_label_str = [normalizer(label) for label in label_str]
-        # for logging, we need the pred/labels to match the norm_pred/norm_labels, so discard any filtered samples here
-        pred_str = [pred_str[i] for i in range(len(norm_pred_str)) if len(norm_label_str[i]) > 0]
-        label_str = [label_str[i] for i in range(len(norm_label_str)) if len(norm_label_str[i]) > 0]
-        # filtering step to only evaluate the samples that correspond to non-zero normalized references:
-        norm_pred_str = [norm_pred_str[i] for i in range(len(norm_pred_str)) if len(norm_label_str[i]) > 0]
-        norm_label_str = [norm_label_str[i] for i in range(len(norm_label_str)) if len(norm_label_str[i]) > 0]
-
-        wer = 100 * metric.compute(predictions=norm_pred_str, references=norm_label_str)
-        return {"wer": wer, "wer_ortho": wer_ortho}, pred_str, label_str, norm_pred_str, norm_label_str
+        return pred_str, label_str
 
     # 12. Define Training Schedule
     # Store some constants
@@ -1318,7 +1034,6 @@ def main():
     decay_parameters = get_parameter_names(
         student_model,
         [nn.LayerNorm],
-        forbidden_module=[student_model.model.encoder] if training_args.freeze_encoder else None,
     )
     decay_parameters = [name for name in decay_parameters if "bias" not in name]
     optimizer_grouped_parameters = [
@@ -1346,11 +1061,9 @@ def main():
         num_training_steps=total_train_steps * accelerator.num_processes,
     )
 
-    data_collator = DataCollatorSpeechSeq2SeqWithPadding(
-        processor=processor,
+    data_collator = DataCollatorCausalLMWithPadding(
+        tokenizer=tokenizer,
         decoder_start_token_id=decoder_start_token_id,
-        decoder_prev_token_id=decoder_prev_token_id,
-        input_padding="longest",
         target_padding="max_length",
         max_target_length=max_label_length,
     )
@@ -1362,20 +1075,6 @@ def main():
         if training_args.generation_num_beams is not None
         else getattr(student_model.generation_config, "num_beams", 1)
     )
-
-    gen_kwargs = {
-        "max_length": max_label_length,
-        "num_beams": num_beams,
-        "return_timestamps": return_timestamps,
-    }
-    if is_multilingual:
-        # forcing the language and task tokens helps multilingual models in their generations
-        gen_kwargs.update(
-            {
-                "language": data_args.language,
-                "task": data_args.task,
-            }
-        )
 
     # 15. Prepare everything with accelerate
     student_model, teacher_model, optimizer, lr_scheduler = accelerator.prepare(
@@ -1403,14 +1102,7 @@ def main():
 
         student_outputs = student_model(**batch)
         with torch.no_grad():
-            if share_hidden_states:
-                # if the student and teacher share the same frozen encoder then we don't have to recompute the
-                # encoder hidden-states for the teacher model, we can just re-use from the student
-                encoder_outputs = BaseModelOutput(student_outputs.encoder_last_hidden_state.to(dtype=teacher_dtype))
-                teacher_outputs = teacher_model(encoder_outputs=encoder_outputs, labels=batch["labels"])
-            else:
-                # do the full forward pass for the teacher model (encoder + decoder)
-                teacher_outputs = teacher_model(**batch)
+            teacher_outputs = teacher_model(**batch)
 
         # CE (data) loss
         ce_loss = student_outputs.loss
@@ -1433,11 +1125,7 @@ def main():
 
         with torch.no_grad():
             student_outputs = student_model(**batch)
-            if share_hidden_states:
-                encoder_outputs = BaseModelOutput(student_outputs.encoder_last_hidden_state.to(dtype=teacher_dtype))
-                teacher_outputs = teacher_model(encoder_outputs=encoder_outputs, labels=batch["labels"])
-            else:
-                teacher_outputs = teacher_model(**batch)
+            teacher_outputs = teacher_model(**batch)
 
         # CE (data) loss
         ce_loss = student_outputs.loss
@@ -1455,7 +1143,7 @@ def main():
 
     def generate_step(batch):
         student_model.eval()
-        output_ids = accelerator.unwrap_model(student_model).generate(batch["input_features"], **gen_kwargs)
+        output_ids = accelerator.unwrap_model(student_model).generate(**batch, max_length=max_label_length, num_beams=num_beams)
         output_ids = accelerator.pad_across_processes(output_ids, dim=1, pad_index=tokenizer.pad_token_id)
         return output_ids
 
@@ -1635,29 +1323,25 @@ def main():
                         eval_metrics = {
                             key: torch.mean(torch.stack([d[key] for d in eval_metrics])) for key in eval_metrics[0]
                         }
+                        try:
+                            eval_metrics["perplexity"] = math.exp(eval_metrics["loss"])
+                        except OverflowError:
+                            eval_metrics["perplexity"] = float("inf")
 
-                        # compute WER metric
-                        wer_desc = ""
                         if training_args.predict_with_generate:
-                            wer_metric, pred_str, label_str, norm_pred_str, norm_label_str = compute_metrics(
-                                eval_preds, eval_labels
-                            )
-                            eval_metrics.update(wer_metric)
-                            wer_desc = " ".join([f"Eval {key}: {value} |" for key, value in wer_metric.items()])
+                            pred_str, label_str = compute_metrics(eval_preds, eval_labels)
                             log_pred(
                                 accelerator,
                                 pred_str,
                                 label_str,
-                                norm_pred_str,
-                                norm_label_str,
                                 step=cur_step,
                                 prefix=eval_split,
                             )
 
                         # Print metrics and update progress bar
+                        logger_desc = " ".join([f"Eval {key}: {value} |" for key, value in eval_metrics.items()])
                         steps_trained_progress_bar.write(
-                            f"Eval results for step ({cur_step} / {total_train_steps} | Eval Loss: {eval_metrics['loss']} |"
-                            f" {wer_desc})"
+                            f"Eval results for step ({cur_step} / {total_train_steps} | {logger_desc}"
                         )
 
                         log_metric(
