@@ -56,7 +56,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     get_scheduler,
-    set_seed, PreTrainedTokenizerBase,
+    set_seed, PreTrainedTokenizerBase, BitsAndBytesConfig,
 )
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
@@ -129,6 +129,17 @@ class ModelArguments:
             )
         },
     )
+    load_teacher_in_8bit: bool = field(
+        default=False, metadata={"help": "Use 8 bit precision for the teacher model."}
+    )
+    load_teacher_in_4bit: bool = field(
+        default=False, metadata={"help": "Use 4 bit precision for the teacher model."}
+    )
+
+    bnb_4bit_quant_type: Optional[str] = field(
+        default="nf4", metadata={"help": "Quantization type if the teacher is quantized (fp4 or nf4)"}
+    )
+    use_bnb_nested_quant: bool = field(default=False, metadata={"help": "Whether or not to use nested quantization."})
 
 
 @dataclass
@@ -218,7 +229,7 @@ class DataTrainingArguments:
         metadata={"help": "The name of the dataset column containing the generated text data in the evaluation set."},
     )
     eval_prompt_column_name: str = field(
-        default="text",
+        default="prompt",
         metadata={"help": "The name of the dataset column containing the prompt data in the evaluation set."},
     )
     max_label_length: int = field(
@@ -290,6 +301,12 @@ class DistillationTrainingArguments(Seq2SeqTrainingArguments):
             )
         },
     )
+    output_router_logits: bool = field(
+        default=False, metadata={
+            "help": "Whether or not to return the router logits in the forward pass. Enabling this will "
+                    "also configure the model to compute the auxiliary loss."
+        }
+    )
     dtype: Optional[str] = field(
         default="float32",
         metadata={
@@ -308,8 +325,6 @@ class DataCollatorCausalLMWithPadding:
     Args:
         tokenizer ([`PreTrainedTokenizer`])
             The tokenizer used for tokenizing the data.
-        decoder_start_token_id (:obj: `int`)
-            The start-of-sequence token id of the decoder.
         target_padding (:obj:`bool`, :obj:`str` or :class:`~transformers.tokenization_utils_base.PaddingStrategy`, `optional`, defaults to :obj:`True`):
             Select a strategy to pad the returned target sequences (according to the model's padding side and padding index).
             See above for details.
@@ -318,7 +333,6 @@ class DataCollatorCausalLMWithPadding:
     """
 
     tokenizer: PreTrainedTokenizerBase
-    decoder_start_token_id: int
     target_padding: Union[bool, str] = "max_length"
     max_target_length: Optional[int] = None
 
@@ -327,34 +341,21 @@ class DataCollatorCausalLMWithPadding:
         label_features = {"input_ids": [feature["labels"] for feature in features]}
         prompt_lengths = [feature["prompt_length"] for feature in features]
 
-        labels_batch = self.tokenizer.pad(
+        batch = self.tokenizer.pad(
             label_features,
             max_length=self.max_target_length,
             padding=self.target_padding,
             return_tensors="pt",
         )
 
-        # shift labels to the right to get decoder input ids
-        labels = labels_batch["input_ids"]
+        labels_mask = batch["attention_mask"]
 
-        batch = {
-            "input_ids": labels[:, :-1],
-            "attention_mask": labels_batch.attention_mask[:, :-1],
-        }
-
-        labels_mask = labels_batch.attention_mask
         # don't include prompts in loss calculation
         for idx in range(len(prompt_lengths)):
             labels_mask[idx, :prompt_lengths[idx]] = 0
 
-        # if bos token is appended in previous tokenization step,
-        # cut bos token here as it's append later anyways
-        if (labels[:, 0] == self.decoder_start_token_id).all().cpu().item():
-            labels = labels[:, 1:]
-            labels_mask = labels_mask[:, 1:]
-
         # replace padding with -100 to ignore loss correctly
-        labels = labels.masked_fill(labels_mask.ne(1), -100)
+        labels = batch["input_ids"].masked_fill(labels_mask.ne(1), -100)
 
         batch["labels"] = labels
 
@@ -641,6 +642,23 @@ def get_parameter_names(model, forbidden_layer_types, forbidden_module=None):
     return result
 
 
+def get_quantization_config(model_args: ModelArguments, teacher_dtype: torch.dtype) -> Optional[BitsAndBytesConfig]:
+    if model_args.load_teacher_in_4bit:
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=teacher_dtype,  # For consistency with model weights, we use the same value as `teacher_dtype`
+            bnb_4bit_quant_type=model_args.bnb_4bit_quant_type,
+            bnb_4bit_use_double_quant=model_args.use_bnb_nested_quant,
+        )
+    elif model_args.load_teacher_in_8bit:
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+        )
+    else:
+        quantization_config = None
+
+    return quantization_config
+
 def main():
     # 1. Parse input arguments
     # We keep distinct sets of args, for cleaner separation of model/data/training related args
@@ -780,9 +798,9 @@ def main():
                 token=model_args.token,
                 streaming=data_args.streaming,
             )
-            if data_args.eval_text_column_name != "text":
+            if dataset_dict["text_column_name"] != "text":
                 raw_datasets["eval"] = raw_datasets["eval"].rename_column(data_args.eval_text_column_name, "text")
-            if data_args.eval_prompt_column_name != "prompt":
+            if dataset_dict["prompt_column_name"] != "prompt":
                 raw_datasets["eval"] = raw_datasets["eval"].rename_column(data_args.eval_prompt_column_name, "prompt")
         else:
             # load multiple eval sets
@@ -826,6 +844,8 @@ def main():
         revision=model_args.model_revision,
         token=model_args.token,
     )
+    if training_args.output_router_logits:
+        config.output_router_logits = True
     tokenizer = AutoTokenizer.from_pretrained(
         (model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path),
         cache_dir=model_args.cache_dir,
@@ -856,11 +876,11 @@ def main():
         attn_implementation=model_args.attn_implementation,
     )
 
-    if student_model.config.decoder_start_token_id is None or teacher_model.config.decoder_start_token_id is None:
+    if student_model.generation_config.bos_token_id is None or teacher_model.generation_config.bos_token_id is None:
         raise ValueError(
-            f"Make sure that `config.decoder_start_token_id` is correctly defined for both the "
-            f"student and teacher model. Got {student_model.config.decoder_start_token_id} for the "
-            f"student and {teacher_model.config.decoder_start_token_id} for the teacher."
+            f"Make sure that `generation_config.bos_token_id` is correctly defined for both the "
+            f"student and teacher model. Got {student_model.generation_config.bos_token_id} for the "
+            f"student and {teacher_model.generation_config.bos_token_id} for the teacher."
         )
 
     # enable gradient checkpointing if necessary
@@ -882,7 +902,7 @@ def main():
                 "or un-freeze the LM head with `--freeze_lm_head=False`."
             )
 
-    student_model.generation_config.update({"max_length": data_args.max_label_length})
+    student_model.generation_config.max_length = data_args.max_label_length
 
     # 8. Save all pre-processed tokenizers/config/generation configs
     if accelerator.is_main_process:
@@ -901,7 +921,6 @@ def main():
     num_workers = data_args.preprocessing_num_workers
     dataloader_num_workers = training_args.dataloader_num_workers
     prefetch_factor = training_args.dataloader_prefetch_factor
-    decoder_start_token_id = student_model.config.decoder_start_token_id
     eos_token_id = tokenizer.eos_token_id
 
     # 10.2: filter based on maximum number of training/evaluation samples
@@ -1022,13 +1041,22 @@ def main():
     else:
         raise ValueError("max_steps must be specified when training with a streaming (iterable) dataset")
 
-    if training_args.eval_steps is None:
+    if training_args.evaluation_strategy == "epoch":
+        eval_steps = steps_per_epoch
+    elif training_args.eval_steps is None:
         logger.info(
             f"eval_steps is not set, evaluating at the end of {'each epoch' if not data_args.streaming else 'training'}"
         )
         eval_steps = steps_per_epoch
     else:
         eval_steps = training_args.eval_steps
+
+    if training_args.save_strategy == "epoch":
+        save_steps = steps_per_epoch
+    elif training_args.save_strategy == "steps":
+        save_steps = training_args.save_steps
+    else:
+        save_steps = sys.maxsize
 
     # 13. Define optimizer, LR scheduler, collator
     decay_parameters = get_parameter_names(
@@ -1063,7 +1091,6 @@ def main():
 
     data_collator = DataCollatorCausalLMWithPadding(
         tokenizer=tokenizer,
-        decoder_start_token_id=decoder_start_token_id,
         target_padding="max_length",
         max_target_length=max_label_length,
     )
@@ -1254,20 +1281,12 @@ def main():
                     )
 
                 # save checkpoint and weights after each save_steps and at the end of training
-                if (cur_step % training_args.save_steps == 0) or cur_step == total_train_steps:
+                if (cur_step % save_steps == 0) or cur_step == total_train_steps:
                     intermediate_dir = os.path.join(training_args.output_dir, f"checkpoint-{cur_step}-epoch-{epoch}")
                     accelerator.save_state(output_dir=intermediate_dir)
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         rotate_checkpoints(training_args.save_total_limit, output_dir=training_args.output_dir)
-
-                        if cur_step == total_train_steps:
-                            # un-wrap student model for save
-                            student_model = accelerator.unwrap_model(student_model)
-                            student_model.save_pretrained(training_args.output_dir)
-                            # re-wrap student model for final eval
-                            student_model = accelerator.prepare(student_model)
-
                         if training_args.push_to_hub:
                             upload_folder(
                                 folder_path=training_args.output_dir,
@@ -1358,6 +1377,16 @@ def main():
 
                 # break condition
                 if cur_step == total_train_steps:
+                    # un-wrap student model for save
+                    student_model = accelerator.unwrap_model(student_model)
+                    student_model.save_pretrained(training_args.output_dir)
+                    if training_args.push_to_hub:
+                        upload_folder(
+                            folder_path=training_args.output_dir,
+                            repo_id=repo_name,
+                            repo_type="model",
+                            commit_message=f"Saving final weights of step {cur_step}",
+                        )
                     continue_training = False
                     break
 
