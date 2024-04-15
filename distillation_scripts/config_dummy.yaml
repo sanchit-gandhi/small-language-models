@@ -7,9 +7,9 @@ load_teacher_in_4bit: true
 # Data arguments
 train_dataset_name: HuggingFaceTB/cosmopedia-100k
 train_dataset_config_name: default
-train_split_name: train[:-1000]
-eval_split_name: train[-1000:]
-num_train_epochs: 10
+train_split_name: train[:100]
+eval_split_name: train[-10:]
+num_train_epochs: 2
 
 # Training arguments
 do_train: true
@@ -17,10 +17,10 @@ do_eval: true
 per_device_eval_batch_size: 4
 per_device_train_batch_size: 4
 learning_rate: 0.0003
-warmup_steps: 500
+warmup_steps: 10
 gradient_checkpointing: true
-dataloader_num_workers: 4
-preprocessing_num_workers: 16
+dataloader_num_workers: 2
+preprocessing_num_workers: 2
 save_strategy: epoch
 evaluation_strategy: epoch
 logging_steps: 25

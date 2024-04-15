@@ -853,11 +853,7 @@ def main():
         else:
             # load multiple eval sets
             for dataset_dict in dataset_names_dict:
-                if dataset_dict["name"] == "esb/diagnostic-dataset":
-                    # for the ESB diagnostic dataset, the dataset name is effectively the config
-                    pretty_name = f"{dataset_dict['config']}-diagnostic/{dataset_dict['split']}"
-                else:
-                    pretty_name = f"{dataset_dict['name'].split('/')[-1]}/{dataset_dict['split'].replace('.', '-')}"
+                pretty_name = f"{dataset_dict['name'].split('/')[-1]}/{dataset_dict['config'].replace('.', '-')}"
                 all_eval_splits.append(pretty_name)
                 raw_datasets[pretty_name] = load_dataset(
                     dataset_dict["name"],
@@ -894,6 +890,7 @@ def main():
     )
     if training_args.output_router_logits:
         config.output_router_logits = True
+
     tokenizer = AutoTokenizer.from_pretrained(
         (model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path),
         cache_dir=model_args.cache_dir,
@@ -980,10 +977,11 @@ def main():
 
     accelerator.wait_for_everyone()
 
+
     # 10. Preprocessing the datasets: we need to combine the prompt and generations and tokenize the targets.
     # 10.1: Define the pre-processing constants
     max_label_length = (
-        data_args.max_label_length if data_args.max_label_length is not None else student_model.config.max_length
+        data_args.max_label_length if data_args.max_label_length is not None else config.max_length
     )
     num_workers = data_args.preprocessing_num_workers
     dataloader_num_workers = training_args.dataloader_num_workers
@@ -1010,6 +1008,8 @@ def main():
     def prepare_datasets(example):
         prompt_ids = tokenizer(example["prompt"]).input_ids
         gen_ids = tokenizer(example["text"], add_special_tokens=False).input_ids + [eos_token_id]
+        if prompt_ids[-1] == eos_token_id:
+            prompt_ids = prompt_ids[:-1]
         example["labels"] = prompt_ids + gen_ids
         example["prompt_length"] = len(prompt_ids)
         return example
