@@ -1,0 +1,26 @@
+# Model arguments
+model_name_or_path: mistralai/Mistral-7B-v0.1
+dtype: bfloat16
+load_in_4bit: true
+
+# Data arguments
+dataset_name: HuggingFaceTB/cosmopedia
+dataset_config_name:
+  - auto_math_text
+  - khanacademy
+  - openstax
+  - stanford
+  - stories
+  - web_samples_v1
+  - web_samples_v2
+  - wikihow
+split_name: train[-1000:]
+
+# Evaluation arguments
+per_device_eval_batch_size: 8
+dataloader_num_workers: 4
+preprocessing_num_workers: 4
+ddp_timeout: 7200
+report_to: wandb
+output_dir: ./
+overwrite_output_dir: true

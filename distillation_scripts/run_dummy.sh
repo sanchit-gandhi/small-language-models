@@ -19,4 +19,5 @@ python run_distillation.py \
   --overwrite_output_dir \
   --output_router_logits True \
   --report_to "wandb" \
-  --load_teacher_in_4bit
+  --load_teacher_in_4bit \
+  --wandb_project "distil-mixtral-dummy"
