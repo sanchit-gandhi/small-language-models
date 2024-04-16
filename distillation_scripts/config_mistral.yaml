@@ -28,7 +28,8 @@ learning_rate: 0.0003
 warmup_steps: 500
 gradient_checkpointing: true
 dataloader_num_workers: 4
-preprocessing_num_workers: 24
+preprocessing_num_workers: 32
+ddp_timeout: 7200
 save_strategy: epoch
 evaluation_strategy: epoch
 logging_steps: 25
