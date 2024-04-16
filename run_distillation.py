@@ -1412,7 +1412,7 @@ def main():
                             key: torch.mean(torch.stack([d[key] for d in eval_metrics])) for key in eval_metrics[0]
                         }
                         try:
-                            eval_metrics["perplexity"] = math.exp(eval_metrics["loss"])
+                            eval_metrics["perplexity"] = math.exp(eval_metrics["ce_loss"])
                         except OverflowError:
                             eval_metrics["perplexity"] = float("inf")
 
