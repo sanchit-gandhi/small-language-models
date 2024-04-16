@@ -10,4 +10,5 @@ python run_evaluation.py \
   --output_router_logits True \
   --report_to "wandb" \
   --load_in_4bit \
-  --wandb_project "distil-mixtral-dummy"
+  --wandb_project "distil-mixtral-dummy" \
+  --streaming

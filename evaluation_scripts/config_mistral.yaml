@@ -15,6 +15,7 @@ dataset_config_name:
   - web_samples_v2
   - wikihow
 split_name: train[-1000:]
+streaming: true
 
 # Evaluation arguments
 per_device_eval_batch_size: 8
