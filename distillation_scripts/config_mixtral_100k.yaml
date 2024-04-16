@@ -7,8 +7,8 @@ load_teacher_in_4bit: true
 # Data arguments
 train_dataset_name: HuggingFaceTB/cosmopedia-100k
 train_dataset_config_name: default
-train_split_name: train[:-1000]
-eval_split_name: train[-1000:]
+train_split_name: train[1000:]
+eval_split_name: train[:1000]
 num_train_epochs: 10
 
 # Training arguments

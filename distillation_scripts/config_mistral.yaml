@@ -15,8 +15,8 @@ train_dataset_config_name:
   - web_samples_v1
   - web_samples_v2
   - wikihow
-train_split_name: train[:-1000]
-eval_split_name: train[-1000:]
+train_split_name: train[1000:]
+eval_split_name: train[:1000]
 num_train_epochs: 10
 
 # Training arguments
