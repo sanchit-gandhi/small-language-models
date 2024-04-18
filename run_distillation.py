@@ -675,12 +675,12 @@ def get_parameter_names(model, forbidden_layer_types, forbidden_module=None):
 
 
 def get_quantization_config(
-    model_args: ModelArguments, teacher_dtype: torch.dtype
+    model_args: ModelArguments, torch_dtype: torch.dtype
 ) -> tuple[BitsAndBytesConfig | None, BitsAndBytesConfig | None]:
     if model_args.load_teacher_in_4bit:
         quantization_config_teacher = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_compute_dtype=teacher_dtype,  # For consistency with model weights, we use the same value as `teacher_dtype`
+            bnb_4bit_compute_dtype=torch_dtype,
             bnb_4bit_quant_type=model_args.bnb_4bit_quant_type,
             bnb_4bit_use_double_quant=model_args.use_bnb_nested_quant,
         )
@@ -692,6 +692,7 @@ def get_quantization_config(
     if model_args.load_student_in_4bit:
         quantization_config_student = BitsAndBytesConfig(
             load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch_dtype,
             bnb_4bit_quant_type=model_args.bnb_4bit_quant_type,
             bnb_4bit_use_double_quant=model_args.use_bnb_nested_quant,
         )
@@ -902,7 +903,7 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     quantization_config_teacher, quantization_config_student = get_quantization_config(
-        model_args, teacher_dtype=teacher_dtype
+        model_args, torch_dtype=teacher_dtype
     )
 
     # The teacher model can safely be cast to the dtype of training since we don't
@@ -924,6 +925,7 @@ def main():
         revision=model_args.model_revision,
         subfolder=model_args.subfolder,
         token=model_args.token,
+        torch_dtype=teacher_dtype,
         low_cpu_mem_usage=True,
         attn_implementation=model_args.attn_implementation,
         quantization_config=quantization_config_student,
@@ -959,11 +961,11 @@ def main():
     # freeze student lm head if necessary
     if training_args.freeze_lm_head:
         set_trainable_parameters(student_model.lm_head, requires_grad=False)
+        # TODO(SG): possibly upgrade this to an error
         if training_args.gradient_checkpointing:
-            # TODO(SG): possibly upgrade this to an error
             logger.warning(
                 "Freezing the LM head is not compatible with gradient checkpointing. Set `--gradient_checkpointing=False`, "
-                "or un-freeze the LM head with `--freeze_lm_head=False`."
+                "or un-freeze the LM head with `--freeze_lm_head=False`. Overriding gradient checkpointing to False."
             )
 
     student_model.generation_config.max_length = data_args.max_label_length
@@ -1004,7 +1006,7 @@ def main():
                 else raw_datasets[eval_split].select(range(data_args.max_eval_samples))
             )
 
-    # 10.4: pre-process training/evaluation datasets
+    # 10.3: pre-process training/evaluation datasets
     def prepare_datasets(example):
         prompt_ids = tokenizer(example["prompt"]).input_ids
         gen_ids = tokenizer(example["text"], add_special_tokens=False).input_ids + [eos_token_id]
@@ -1043,7 +1045,7 @@ def main():
                     else map_fn_eval()
                 )
 
-    # 10.6: Filter training data with labels longer than `max_label_length`
+    # 10.4: Filter training data with labels longer than `max_label_length`
     def is_labels_in_length_range(labels):
         return 0 < len(labels) <= max_label_length
 
@@ -1085,12 +1087,13 @@ def main():
         return pred_str, label_str
 
     # 12. Define Training Schedule
-    # Store some constants
+    # 12.1: Store some constants
     per_device_train_batch_size = int(training_args.per_device_train_batch_size)
     train_batch_size = per_device_train_batch_size * accelerator.num_processes
     gradient_accumulation_steps = int(training_args.gradient_accumulation_steps)
     per_device_eval_batch_size = int(training_args.per_device_eval_batch_size)
 
+    # 12.2: Set max training steps
     if not data_args.streaming and training_args.max_steps < 0:
         num_epochs = int(training_args.num_train_epochs)
         steps_per_epoch = len(vectorized_datasets["train"]) // (train_batch_size * gradient_accumulation_steps)
@@ -1108,6 +1111,7 @@ def main():
     else:
         raise ValueError("max_steps must be specified when training with a streaming (iterable) dataset")
 
+    # 12.3: Set evaluation steps
     if training_args.evaluation_strategy == "epoch":
         eval_steps = steps_per_epoch
     elif training_args.eval_steps is None:
@@ -1118,6 +1122,7 @@ def main():
     else:
         eval_steps = training_args.eval_steps
 
+    # 12.4: Set save steps
     if training_args.save_strategy == "epoch":
         save_steps = steps_per_epoch
     elif training_args.save_strategy == "steps":

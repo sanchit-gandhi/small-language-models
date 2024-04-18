@@ -20,4 +20,6 @@ python run_distillation.py \
   --output_router_logits True \
   --report_to "wandb" \
   --load_teacher_in_4bit \
+  --load_student_in_4bit \
+  --dtype "float16" \
   --wandb_project "distil-mixtral-dummy"
