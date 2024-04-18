@@ -40,3 +40,4 @@ report_to: all
 output_dir: ./
 overwrite_output_dir: true
 save_total_limit: 1
+wandb_project: distil-mistral

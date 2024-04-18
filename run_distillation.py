@@ -301,7 +301,7 @@ class DataTrainingArguments:
         metadata={"help": "Whether to use Datasets' streaming mode to load and pre-process the data."},
     )
     wandb_project: str = field(
-        default="distil-mixtral",
+        default="distil-mistral",
         metadata={"help": "The name of the wandb project."},
     )
 
@@ -823,6 +823,7 @@ def main():
             accelerator=accelerator,
             cache_dir=data_args.dataset_cache_dir,
             token=model_args.token,
+            num_proc=data_args.preprocessing_num_workers,
         )
         raw_datasets_train_features = set(raw_datasets["train"].features.keys())
 
