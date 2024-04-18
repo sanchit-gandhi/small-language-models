@@ -17,7 +17,7 @@ train_dataset_config_name:
   - wikihow
 train_split_name: train[1000:]
 eval_split_name: train[:1000]
-num_train_epochs: 10
+max_steps: 50000
 
 # Training arguments
 do_train: true
@@ -30,12 +30,13 @@ gradient_checkpointing: true
 dataloader_num_workers: 4
 preprocessing_num_workers: 32
 ddp_timeout: 7200
-save_strategy: epoch
-evaluation_strategy: epoch
+save_strategy: steps
+save_steps: 5000
+evaluation_strategy: steps
+eval_steps: 5000
 logging_steps: 25
 output_router_logits: true
 report_to: wandb
 output_dir: ./
 overwrite_output_dir: true
-resume_from_checkpoint: true
 save_total_limit: 1
