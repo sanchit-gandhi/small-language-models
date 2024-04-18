@@ -161,6 +161,10 @@ class ModelArguments:
         default=None,
         metadata={"help": "Model layers to unfreeze & train"},
     )
+    instruction_model: Optional[bool] = field(
+        default=None,
+        metadata={"help": "Whether or not the pre-trained model is instruction tuned"},
+    )
 
 
 @dataclass
@@ -989,6 +993,13 @@ def main():
     dataloader_num_workers = training_args.dataloader_num_workers
     prefetch_factor = training_args.dataloader_prefetch_factor
     eos_token_id = tokenizer.eos_token_id
+    # TODO(SG): can we set the instruction tokens programmatically? e.g. with `apply_chat_templates`?
+    inst_token = "[INST] "
+    assistant_token = " [/INST]"
+    if model_args.instruction_model is not None:
+        instruction_model = model_args.instruction_model
+    else:
+        instruction_model = "instruct" in model_args.model_name_or_path.lower()
 
     # 10.2: filter based on maximum number of training/evaluation samples
     if training_args.do_train and data_args.max_train_samples is not None:
@@ -1008,12 +1019,10 @@ def main():
 
     # 10.3: pre-process training/evaluation datasets
     def prepare_datasets(example):
-        prompt_ids = tokenizer(example["prompt"]).input_ids
-        gen_ids = tokenizer(example["text"], add_special_tokens=False).input_ids + [eos_token_id]
-        if prompt_ids[-1] == eos_token_id:
-            prompt_ids = prompt_ids[:-1]
-        example["labels"] = prompt_ids + gen_ids
-        example["prompt_length"] = len(prompt_ids)
+        if instruction_model:
+            example["prompt"] = inst_token + example["prompt"].strip() + assistant_token
+        example["labels"] = tokenizer(example["prompt"] + example["text"]).input_ids + [eos_token_id]
+        example["prompt_length"] = len(tokenizer(example["prompt"]).input_ids)
         return example
 
     vectorized_datasets = IterableDatasetDict() if data_args.streaming else DatasetDict()
