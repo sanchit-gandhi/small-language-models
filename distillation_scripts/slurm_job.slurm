@@ -2,7 +2,7 @@
 #SBATCH --job-name=distil-mistral
 #SBATCH --nodes=1
 # set 24h for job wall time limit
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --ntasks-per-node=1          # crucial - only 1 task per dist per node!
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:8
@@ -12,14 +12,15 @@
 
 set -x -e
 
+# START EDIT
 source ~/.bashrc
-conda activate venv
-
-echo "START TIME: $(date)"
-
+source /fsx/sanchit/miniconda3/bin/activate venv
 
 LOG_PATH="/fsx/sanchit/logs/main_log.txt"
 SAVE_DIR="/fsx/sanchit"
+# END EDIT
+
+echo "START TIME: $(date)"
 
 GPUS_PER_NODE=8
 NNODES=$SLURM_NNODES

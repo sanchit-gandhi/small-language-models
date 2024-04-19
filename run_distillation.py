@@ -1053,8 +1053,11 @@ def main():
             {"role": "user", "content": example["prompt"]},
             {"role": "assistant", "content": example["text"]},
         ]
-        example["labels"] = tokenizer.apply_chat_template(messages).input_ids
-        example["prompt_length"] = len(tokenizer.apply_chat_template([messages[0]]).input_ids)
+        example["labels"] = tokenizer.apply_chat_template(messages)
+        if example["labels"][-1] != eos_token_id:
+            example["labels"] = example["labels"][:-1]
+
+        example["prompt_length"] = len(tokenizer.apply_chat_template([messages[0]]))
         return example
 
     prepare_dataset = prepare_instruction_dataset if instruction_model else prepare_dataset
