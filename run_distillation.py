@@ -994,9 +994,6 @@ def main():
     dataloader_num_workers = training_args.dataloader_num_workers
     prefetch_factor = training_args.dataloader_prefetch_factor
     eos_token_id = tokenizer.eos_token_id
-    # TODO(SG): can we set the instruction tokens programmatically? e.g. with `apply_chat_templates`?
-    inst_token = "[INST] "
-    assistant_token = " [/INST]"
     if model_args.instruction_model is not None:
         instruction_model = model_args.instruction_model
     else:
@@ -1019,13 +1016,23 @@ def main():
             )
 
     # 10.3: pre-process training/evaluation datasets
-    def prepare_datasets(example):
-        if instruction_model:
-            example["prompt"] = inst_token + example["prompt"].strip() + assistant_token
-        example["labels"] = tokenizer(example["prompt"] + example["text"]).input_ids + [eos_token_id]
+    def prepare_dataset(example):
+        example["labels"] = tokenizer(example["prompt"] + example["text"]).input_ids
+        if example["labels"][-1] != eos_token_id:
+            example["labels"] += [eos_token_id]
         example["prompt_length"] = len(tokenizer(example["prompt"]).input_ids)
         return example
 
+    def prepare_instruction_dataset(example):
+        messages = [
+            {"role": "user", "content": example["prompt"]},
+            {"role": "assistant", "content": example["text"]},
+        ]
+        example["labels"] = tokenizer.apply_chat_template(messages).input_ids
+        example["prompt_length"] = len(tokenizer.apply_chat_template([messages[0]]).input_ids)
+        return example
+
+    prepare_dataset = prepare_instruction_dataset if instruction_model else prepare_dataset
     vectorized_datasets = IterableDatasetDict() if data_args.streaming else DatasetDict()
     if training_args.do_train:
         # with streaming mode we can only have 1 worker, whereas with non-streaming
@@ -1033,7 +1040,7 @@ def main():
         # We gate the pre-processing function accordingly
         map_fn_train = partial(
             raw_datasets["train"].map,
-            function=prepare_datasets,
+            function=prepare_dataset,
             remove_columns=raw_datasets_train_features,
         )
         with accelerator.main_process_first():
@@ -1046,7 +1053,7 @@ def main():
         for eval_split in all_eval_splits:
             raw_datasets_eval_features = list(raw_datasets[eval_split].features.keys())
             map_fn_eval = partial(
-                raw_datasets[eval_split].map, function=prepare_datasets, remove_columns=raw_datasets_eval_features
+                raw_datasets[eval_split].map, function=prepare_dataset, remove_columns=raw_datasets_eval_features
             )
             with accelerator.main_process_first():
                 vectorized_datasets[eval_split] = (
