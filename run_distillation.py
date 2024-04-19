@@ -362,6 +362,7 @@ class DataCollatorCausalLMWithPadding:
     def __call__(self, features: List[Dict[str, Union[List[int], np.ndarray]]]) -> BatchEncoding:
         # dataloader returns a list of features which we convert to a dict
         label_features = {"input_ids": [feature["labels"] for feature in features]}
+        label_lengths = [len(feature["labels"]) for feature in features]
         prompt_lengths = [feature["prompt_length"] for feature in features]
 
         batch = self.tokenizer.pad(
@@ -375,7 +376,8 @@ class DataCollatorCausalLMWithPadding:
 
         # don't include prompts in loss calculation
         for idx in range(len(prompt_lengths)):
-            labels_mask[idx, : prompt_lengths[idx]] = 0
+            padding_length = labels_mask.shape[1] - label_lengths[idx]
+            labels_mask[idx, padding_length : padding_length + prompt_lengths[idx]] = 0
 
         # replace padding with -100 to ignore loss correctly
         labels = batch["input_ids"].masked_fill(labels_mask.ne(1), -100)
