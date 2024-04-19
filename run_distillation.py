@@ -1367,7 +1367,7 @@ def main():
                         learning_rate=lr_scheduler.get_last_lr()[0],
                         train_time=train_time + time.time() - train_start,
                         step=cur_step,
-                        epoch=epoch,
+                        epoch=epoch if data_args.streaming else epoch + (cur_step - epoch * steps_per_epoch) / steps_per_epoch,
                         prefix="train",
                     )
 
@@ -1445,7 +1445,7 @@ def main():
                                 pred_str,
                                 label_str,
                                 step=cur_step,
-                                epoch=epochs_trained,
+                                epoch=epoch,
                                 evaluation_strategy=training_args.evaluation_strategy,
                                 prefix=eval_split,
                             )
@@ -1461,7 +1461,7 @@ def main():
                             metrics=eval_metrics,
                             train_time=eval_time,
                             step=cur_step,
-                            epoch=epoch,
+                            epoch=epoch if data_args.streaming else epoch + (cur_step - epoch * steps_per_epoch) / steps_per_epoch,
                             prefix=eval_split,
                         )
 
