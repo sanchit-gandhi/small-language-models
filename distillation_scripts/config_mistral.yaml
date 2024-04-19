@@ -18,6 +18,7 @@ train_dataset_config_name:
 train_split_name: train[1000:]
 eval_split_name: train[:1000]
 max_steps: 100000
+max_train_samples: 10000000
 
 # Training arguments
 do_train: true
@@ -41,3 +42,4 @@ output_dir: ./
 overwrite_output_dir: true
 save_total_limit: 1
 wandb_project: distil-mistral
+push_to_hub: true
