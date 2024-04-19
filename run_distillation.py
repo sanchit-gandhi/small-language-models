@@ -607,6 +607,8 @@ def load_multiple_datasets(
     else:
         interleaved_dataset = concatenate_datasets(all_datasets)
 
+    # shuffle mixed dataset prior to potentially truncating it
+    interleaved_dataset = interleaved_dataset.shuffle(seed)
     return interleaved_dataset
 
 
