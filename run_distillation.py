@@ -630,7 +630,7 @@ def sorted_checkpoints(output_dir=None, checkpoint_prefix="checkpoint") -> List[
     return checkpoints_sorted
 
 
-def rotate_checkpoints(save_total_limit=None, output_dir=None, checkpoint_prefix="checkpoint") -> None:
+def rotate_checkpoints(save_total_limit=None, output_dir=None, checkpoint_prefix="checkpoint") -> Union[List, None]:
     """Helper function to delete old checkpoints."""
     if save_total_limit is None or save_total_limit <= 0:
         return
@@ -644,6 +644,8 @@ def rotate_checkpoints(save_total_limit=None, output_dir=None, checkpoint_prefix
     for checkpoint in checkpoints_to_be_deleted:
         logger.info(f"Deleting older checkpoint [{checkpoint}] due to args.save_total_limit")
         shutil.rmtree(checkpoint, ignore_errors=True)
+    checkpoints_to_be_deleted = [f"*{Path(checkpoint).absolute().name}*"  for checkpoint in checkpoints_to_be_deleted]
+    return checkpoints_to_be_deleted
 
 
 _RE_CHECKPOINT = re.compile(r"^checkpoint-(\d+)-epoch-(\d+)$")
@@ -797,7 +799,7 @@ def main():
     last_checkpoint = None
     if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
+        if last_checkpoint is None and len(sorted_checkpoints(training_args.output_dir)) > 0:
             raise ValueError(
                 f"Output directory ({training_args.output_dir}) already exists and is not empty. "
                 "Use --overwrite_output_dir to overcome."
@@ -810,6 +812,8 @@ def main():
 
     # 5. Handle the repository creation
     if accelerator.is_main_process:
+        if training_args.output_dir is not None:
+            os.makedirs(training_args.output_dir, exist_ok=True)
         if training_args.push_to_hub:
             if training_args.hub_model_id is None:
                 repo_name = get_full_repo_name(
@@ -823,8 +827,6 @@ def main():
             with open(os.path.join(training_args.output_dir, ".gitignore"), "w+") as gitignore:
                 if "wandb" not in gitignore:
                     gitignore.write("wandb\n")
-        elif training_args.output_dir is not None:
-            os.makedirs(training_args.output_dir, exist_ok=True)
     accelerator.wait_for_everyone()
 
     # 6. Load dataset - either streaming or non-streaming (offline)
@@ -1400,13 +1402,14 @@ def main():
                     accelerator.save_state(output_dir=intermediate_dir)
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        rotate_checkpoints(training_args.save_total_limit, output_dir=training_args.output_dir)
+                        checkpoint_to_be_deleted = rotate_checkpoints(training_args.save_total_limit, output_dir=training_args.output_dir)
                         if training_args.push_to_hub:
                             upload_folder(
                                 folder_path=training_args.output_dir,
                                 repo_id=repo_name,
                                 repo_type="model",
                                 commit_message=f"Saving train state of step {cur_step}",
+                                delete_patterns=checkpoint_to_be_deleted,
                             )
 
                 if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps):

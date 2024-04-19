@@ -39,7 +39,7 @@ logging_steps: 25
 output_router_logits: true
 report_to: all
 output_dir: ./
-overwrite_output_dir: true
+overwrite_output_dir: false
 save_total_limit: 1
 wandb_project: distil-mistral
 push_to_hub: true

@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=distil-mixtral
+#SBATCH --job-name=distil-mistral
 #SBATCH --nodes=1
 # set 24h for job wall time limit
-#SBATCH --time=4-0:00:00
+#SBATCH --time=24:00:00
 #SBATCH --ntasks-per-node=1          # crucial - only 1 task per dist per node!
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:8
@@ -46,7 +46,7 @@ MASTER_PORT=$(unused_port)
 
 export LAUNCHER="python -u -m accelerate.commands.launch --config_file ./accelerate_config.yaml"
 
-export PROGRAM="./run_distillation.py config_mistral.yaml"
+export PROGRAM="./run_distillation.py ./config_mistral.yaml"
 export CMD="$LAUNCHER $PROGRAM"
 echo $CMD
 
