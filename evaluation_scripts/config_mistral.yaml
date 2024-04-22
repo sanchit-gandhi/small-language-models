@@ -4,8 +4,8 @@ dtype: bfloat16
 load_in_4bit: true
 
 # Data arguments
-dataset_name: HuggingFaceTB/cosmopedia
-dataset_config_name:
+eval_dataset_name: HuggingFaceTB/cosmopedia
+eval_dataset_config_name:
   - auto_math_text
   - khanacademy
   - openstax
@@ -14,8 +14,8 @@ dataset_config_name:
   - web_samples_v1
   - web_samples_v2
   - wikihow
-split_name: train
-max_samples: 1000
+eval_split_name: train
+max_eval_samples: 1000
 streaming: true
 
 # Evaluation arguments

@@ -1,0 +1,5 @@
+# WinoGrande
+leaderboard|winogrande|0|0
+lighteval|arc:easy|0|0
+# HellaSwag
+leaderboard|hellaswag|0|0

@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 python run_evaluation.py \
   --model_name_or_path "sanchit-gandhi/tiny-random-MistralForCausalLM-1-layer" \
   --output_dir "./" \

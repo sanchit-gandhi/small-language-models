@@ -1,6 +1,7 @@
 # Model arguments
 model_name_or_path: sanchit-gandhi/Mistral-1.5B-Instruct-v0.2
 teacher_model_name_or_path: mistralai/Mistral-7B-Instruct-v0.2
+tokenizer_name: mistralai/Mistral-7B-Instruct-v0.2
 dtype: bfloat16
 load_teacher_in_4bit: true
 

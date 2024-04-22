@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 accelerate launch run_evals_accelerate.py \
     --model_args "pretrained=hf-internal-testing/tiny-random-MistralForCausalLM" \
     --tasks "./all_cosmo_tasks.txt" \
