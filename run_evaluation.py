@@ -143,7 +143,7 @@ class DataTrainingArguments:
     """
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
-    dataset_name: Optional[List[str]] = field(
+    eval_dataset_name: Optional[List[str]] = field(
         default=None,
         metadata={
             "help": "The name of the evaluation dataset to use (via the datasets library). Defaults to the training "
@@ -151,7 +151,7 @@ class DataTrainingArguments:
             "ids by a '+' symbol."
         },
     )
-    dataset_config_name: Optional[List[str]] = field(
+    eval_dataset_config_name: Optional[List[str]] = field(
         default=None,
         metadata={
             "help": "The configuration name of the evaluation dataset to use (via the datasets library). Defaults to the "
@@ -170,7 +170,7 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "The number of processes to use for the preprocessing if using non-streaming mode."},
     )
-    max_samples: Optional[int] = field(
+    max_eval_samples: Optional[int] = field(
         default=None,
         metadata={
             "help": (
@@ -178,11 +178,11 @@ class DataTrainingArguments:
             )
         },
     )
-    text_column_name: str = field(
+    eval_text_column_name: str = field(
         default=None,
         metadata={"help": "The name of the dataset column containing the generated text data in the evaluation set."},
     )
-    prompt_column_name: str = field(
+    eval_prompt_column_name: str = field(
         default=None,
         metadata={"help": "The name of the dataset column containing the prompt data in the evaluation set."},
     )
@@ -211,7 +211,7 @@ class DataTrainingArguments:
             )
         },
     )
-    split_name: Optional[List[str]] = field(
+    eval_split_name: Optional[List[str]] = field(
         default=lambda: ["validation"],
         metadata={
             "help": (
@@ -405,8 +405,8 @@ def convert_dataset_str_to_list(
                 "name": ds_name,
                 "config": dataset_config_names[i],
                 "split": splits[i],
-                "text_column_name": text_column_names[i],
-                "prompt_column_name": prompt_column_names[i],
+                "eval_text_column_name": text_column_names[i],
+                "eval_prompt_column_name": prompt_column_names[i],
                 "samples": dataset_samples[i],
             }
         )
@@ -485,11 +485,11 @@ def main():
     # set seed for determinism
     set_seed(training_args.seed)
     dataset_names_dict = convert_dataset_str_to_list(
-        data_args.dataset_name,
-        data_args.dataset_config_name,
-        splits=data_args.split_name,
-        text_column_names=data_args.text_column_name,
-        prompt_column_names=data_args.prompt_column_name,
+        data_args.eval_dataset_name,
+        data_args.eval_dataset_config_name,
+        splits=data_args.eval_split_name,
+        text_column_names=data_args.eval_text_column_name,
+        prompt_column_names=data_args.eval_prompt_column_name,
     )
     all_eval_splits = []
     if len(dataset_names_dict) == 1:
@@ -504,10 +504,10 @@ def main():
             token=model_args.token,
             streaming=data_args.streaming,
         )
-        if dataset_dict["text_column_name"] != "text":
-            raw_datasets["eval"] = raw_datasets["eval"].rename_column(data_args.text_column_name, "text")
-        if dataset_dict["prompt_column_name"] != "prompt":
-            raw_datasets["eval"] = raw_datasets["eval"].rename_column(data_args.prompt_column_name, "prompt")
+        if dataset_dict["eval_text_column_name"] != "text":
+            raw_datasets["eval"] = raw_datasets["eval"].rename_column(data_args.eval_text_column_name, "text")
+        if dataset_dict["eval_prompt_column_name"] != "prompt":
+            raw_datasets["eval"] = raw_datasets["eval"].rename_column(data_args.eval_prompt_column_name, "prompt")
     else:
         # load multiple eval sets
         for dataset_dict in dataset_names_dict:
@@ -522,13 +522,13 @@ def main():
                 streaming=data_args.streaming,
             )
             # make column names consistent (text, audio)
-            if dataset_dict["text_column_name"] != "text":
+            if dataset_dict["eval_text_column_name"] != "text":
                 raw_datasets[pretty_name] = raw_datasets[pretty_name].rename_column(
-                    dataset_dict["text_column_name"], "text"
+                    dataset_dict["eval_text_column_name"], "text"
                 )
-            if dataset_dict["prompt_column_name"] != "prompt":
+            if dataset_dict["eval_prompt_column_name"] != "prompt":
                 raw_datasets[pretty_name] = raw_datasets[pretty_name].rename_column(
-                    dataset_dict["prompt_column_name"], "prompt"
+                    dataset_dict["eval_prompt_column_name"], "prompt"
                 )
             raw_datasets[pretty_name] = raw_datasets[pretty_name].remove_columns(
                 set(raw_datasets[pretty_name].features.keys()) - {"text", "prompt"}
@@ -589,12 +589,12 @@ def main():
     eos_token_id = tokenizer.eos_token_id
 
     # 10.2: filter based on maximum number of evaluation samples
-    if data_args.max_samples is not None:
+    if data_args.max_eval_samples is not None:
         for eval_split in all_eval_splits:
             raw_datasets[eval_split] = (
-                raw_datasets[eval_split].take(data_args.max_samples)
+                raw_datasets[eval_split].take(data_args.max_eval_samples)
                 if data_args.streaming
-                else raw_datasets[eval_split].select(range(data_args.max_samples))
+                else raw_datasets[eval_split].select(range(data_args.max_eval_samples))
             )
 
     # 10.4: pre-process training/evaluation datasets
@@ -706,7 +706,6 @@ def main():
         eval_metrics = []
         eval_preds = []
         eval_labels = []
-        eval_start = time.time()
 
         validation_dataloader = DataLoader(
             vectorized_datasets[eval_split],
@@ -740,10 +739,9 @@ def main():
                 eval_preds.extend(generated_ids)
                 eval_labels.extend(labels)
 
-        eval_time = time.time() - eval_start
         # normalize eval metrics
         eval_metrics = {
-            key: torch.mean(torch.stack([d[key] for d in eval_metrics])) for key in eval_metrics[0]
+            key: torch.mean(torch.concatenate([d[key] for d in eval_metrics])) for key in eval_metrics[0]
         }
         try:
             eval_metrics["perplexity"] = math.exp(eval_metrics["ce_loss"])

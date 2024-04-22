@@ -1401,9 +1401,15 @@ def main():
 
                 # save checkpoint and weights after each save_steps and at the end of training
                 if (cur_step % save_steps == 0) or cur_step == total_train_steps:
+                    accelerator.wait_for_everyone()
                     intermediate_dir = os.path.join(training_args.output_dir, f"checkpoint-{cur_step}-epoch-{epoch}")
                     accelerator.save_state(output_dir=intermediate_dir)
-                    accelerator.wait_for_everyone()
+                    unwrapped_model = accelerator.unwrap_model(student_model)
+                    unwrapped_model.save_pretrained(
+                        intermediate_dir,
+                        is_main_process=accelerator.is_main_process,
+                        save_function=accelerator.save,
+                    )
                     if accelerator.is_main_process:
                         checkpoint_to_be_deleted = rotate_checkpoints(training_args.save_total_limit, output_dir=training_args.output_dir)
                         if training_args.push_to_hub:
@@ -1460,7 +1466,7 @@ def main():
                         eval_time = time.time() - eval_start
                         # normalize eval metrics
                         eval_metrics = {
-                            key: torch.mean(torch.stack([d[key] for d in eval_metrics])) for key in eval_metrics[0]
+                            key: torch.mean(torch.concatenate([d[key] for d in eval_metrics])) for key in eval_metrics[0]
                         }
                         try:
                             eval_metrics["perplexity"] = math.exp(eval_metrics["ce_loss"])
@@ -1499,10 +1505,15 @@ def main():
 
                 # break condition
                 if cur_step == total_train_steps:
+                    accelerator.wait_for_everyone()
                     # un-wrap student model for save
                     student_model = accelerator.unwrap_model(student_model)
-                    student_model.save_pretrained(training_args.output_dir)
-                    if training_args.push_to_hub:
+                    student_model.save_pretrained(
+                        training_args.output_dir,
+                        is_main_process=accelerator.is_main_process,
+                        save_function=accelerator.save,
+                    )
+                    if training_args.push_to_hub and accelerator.is_main_process:
                         upload_folder(
                             folder_path=training_args.output_dir,
                             repo_id=repo_name,
