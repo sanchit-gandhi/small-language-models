@@ -991,12 +991,6 @@ def main():
     # freeze student lm head if necessary
     if training_args.freeze_lm_head:
         set_trainable_parameters(student_model.lm_head, requires_grad=False)
-        # TODO(SG): possibly upgrade this to an error
-        if training_args.gradient_checkpointing:
-            logger.warning(
-                "Freezing the LM head is not compatible with gradient checkpointing. Set `--gradient_checkpointing=False`, "
-                "or un-freeze the LM head with `--freeze_lm_head=False`. Overriding gradient checkpointing to False."
-            )
 
     student_model.generation_config.max_length = data_args.max_label_length
 
@@ -1464,9 +1458,10 @@ def main():
                                 eval_labels.extend(labels)
 
                         eval_time = time.time() - eval_start
+                        stack = torch.stack if accelerator.num_processes == 1 else torch.concatenate
                         # normalize eval metrics
                         eval_metrics = {
-                            key: torch.mean(torch.concatenate([d[key] for d in eval_metrics])) for key in eval_metrics[0]
+                            key: torch.mean(stack([d[key] for d in eval_metrics])) for key in eval_metrics[0]
                         }
                         try:
                             eval_metrics["perplexity"] = math.exp(eval_metrics["ce_loss"])

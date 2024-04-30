@@ -145,6 +145,7 @@ def main():
     logger.info("*** Load and initialise student model ***")
     student_model = AutoModelForCausalLM.from_config(student_config)
     missing_keys, unexpected_keys = student_model.load_state_dict(teacher_model.state_dict(), strict=False)
+    student_model.to(dtype=torch_dtype)
     if len(missing_keys) > 0:
         raise RuntimeError(
             f"Error(s) in loading state_dict for {student_model.__class__.__name__}. \n"
