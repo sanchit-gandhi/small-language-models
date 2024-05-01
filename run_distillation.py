@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Training langauge models Whisper model for conditional language modelling tasks via teacher-student distillation.
+Training langauge models for conditional language modelling tasks via teacher-student distillation.
 """
 # You can also adapt this script for your own distillation tasks. Pointers for this are left as comments.
 
@@ -323,7 +323,7 @@ class DistillationTrainingArguments(Seq2SeqTrainingArguments):
             )
         },
     )
-    output_router_logits: bool = field(
+    output_router_logits: Optional[bool] = field(
         default=False,
         metadata={
             "help": "Whether or not to return the router logits in the forward pass. Enabling this will "
@@ -337,6 +337,12 @@ class DistillationTrainingArguments(Seq2SeqTrainingArguments):
                 "The data type (dtype) in which to run training. One of `float32` (full-precision), "
                 "`float16` or `bfloat16` (both half-precision)."
             )
+        },
+    )
+    completions_only: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": "Whether to train only on the target completions, or the prompt + completions."
         },
     )
 
@@ -353,11 +359,14 @@ class DataCollatorCausalLMWithPadding:
             See above for details.
         max_target_length (:obj:`int`, `optional`):
             Maximum length of the ``labels`` of the returned list and optionally padding length (see above).
+        completions_only (:obj:`bool`, `optional`):
+            Whether to train on the assistant responses (completions) only, or the combination of prompt + responses.
     """
 
     tokenizer: PreTrainedTokenizerBase
     target_padding: Union[bool, str] = "max_length"
     max_target_length: Optional[int] = None
+    completions_only: Optional[bool] = False
 
     def __call__(self, features: List[Dict[str, Union[List[int], np.ndarray]]]) -> BatchEncoding:
         # dataloader returns a list of features which we convert to a dict
@@ -374,10 +383,11 @@ class DataCollatorCausalLMWithPadding:
 
         labels_mask = batch["attention_mask"]
 
-        # don't include prompts in loss calculation
-        for idx in range(len(prompt_lengths)):
-            padding_length = labels_mask.shape[1] - label_lengths[idx]
-            labels_mask[idx, padding_length : padding_length + prompt_lengths[idx]] = 0
+        if self.completions_only:
+            # don't include prompts in loss calculation
+            for idx in range(len(prompt_lengths)):
+                padding_length = labels_mask.shape[1] - label_lengths[idx]
+                labels_mask[idx, padding_length : padding_length + prompt_lengths[idx]] = 0
 
         # replace padding with -100 to ignore loss correctly
         labels = batch["input_ids"].masked_fill(labels_mask.ne(1), -100)
@@ -1204,6 +1214,7 @@ def main():
         tokenizer=tokenizer,
         target_padding="max_length",
         max_target_length=max_label_length,
+        completions_only=training_args.completions_only,
     )
 
     # 14. Define generation arguments - we need to do this before we wrap the models in DDP
