@@ -1,7 +1,6 @@
 # Model arguments
 model_name_or_path: sanchit-gandhi/Mistral-1.5B-Instruct-v0.2
 teacher_model_name_or_path: mistralai/Mistral-7B-Instruct-v0.2
-tokenizer_name: mistralai/Mistral-7B-Instruct-v0.2
 dtype: bfloat16
 load_teacher_in_4bit: true
 
@@ -18,14 +17,15 @@ train_dataset_config_name:
   - wikihow
 train_split_name: train[1000:]
 eval_split_name: train[:1000]
-max_steps: 100000
-max_train_samples: 10000000
+max_steps: 200000
+max_train_samples: 20000000
 
 # Training arguments
 do_train: true
 do_eval: true
 per_device_eval_batch_size: 8
 per_device_train_batch_size: 8
+max_label_length: 4096
 learning_rate: 0.0001
 warmup_steps: 500
 gradient_checkpointing: true

@@ -1,5 +1,5 @@
 # Model arguments
-model_name_or_path: mistralai/Mistral-7B-Instruct-v0.2
+model_name_or_path: mistralai/Mixtral-8x7B-Instruct-v0.1
 dtype: bfloat16
 load_in_4bit: true
 
@@ -17,10 +17,10 @@ eval_dataset_config_name:
 eval_split_name: train
 max_eval_samples: 1000
 streaming: true
-wandb_project: distil-mistral
+wandb_project: distil-mixtral
 
 # Evaluation arguments
-per_device_eval_batch_size: 8
+per_device_eval_batch_size: 4
 dataloader_num_workers: 4
 preprocessing_num_workers: 4
 ddp_timeout: 7200

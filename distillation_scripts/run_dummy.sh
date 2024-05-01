@@ -22,5 +22,6 @@ accelerate launch --multi_gpu --num_processes=8 --gpu_ids="all" run_distillation
   --output_router_logits True \
   --report_to "wandb" \
   --load_teacher_in_4bit \
+  --gradient_checkpointing \
   --dtype "bfloat16" \
   --wandb_project "distil-mixtral-dummy"

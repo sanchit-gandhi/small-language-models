@@ -1,6 +1,7 @@
 # Model arguments
-model_name_or_path: sanchit-gandhi/mixtral-8x1.5B
-teacher_model_name_or_path: mistralai/Mixtral-8x7B-v0.1
+model_name_or_path: sanchit-gandhi/mixtral-8x1.5B-Instruct-v0.1
+teacher_model_name_or_path: mistralai/Mixtral-8x7B-Instruct-v0.1
+tokenizer_name: mistralai/Mistral-7B-Instruct-v0.2
 dtype: bfloat16
 load_teacher_in_4bit: true
 
@@ -17,23 +18,30 @@ train_dataset_config_name:
   - wikihow
 train_split_name: train[1000:]
 eval_split_name: train[:1000]
-num_train_epochs: 10
+max_steps: 200000
+max_train_samples: 20000000
 
 # Training arguments
 do_train: true
 do_eval: true
-per_device_eval_batch_size: 4
-per_device_train_batch_size: 4
-learning_rate: 0.0003
+per_device_eval_batch_size: 8
+per_device_train_batch_size: 8
+max_label_length: 4096
+learning_rate: 0.0001
 warmup_steps: 500
 gradient_checkpointing: true
 dataloader_num_workers: 4
 preprocessing_num_workers: 32
 ddp_timeout: 7200
-save_strategy: epoch
-evaluation_strategy: epoch
+save_strategy: steps
+save_steps: 5000
+evaluation_strategy: steps
+eval_steps: 5000
 logging_steps: 25
-overwrite_output_dir: true
 output_router_logits: true
-report_to: wandb
+report_to: all
 output_dir: ./
+overwrite_output_dir: false
+save_total_limit: 1
+wandb_project: distil-mixtral
+push_to_hub: true

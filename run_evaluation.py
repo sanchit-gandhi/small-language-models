@@ -740,8 +740,10 @@ def main():
                 eval_labels.extend(labels)
 
         # normalize eval metrics
+        stack = torch.stack if accelerator.num_processes == 1 else torch.concatenate
+        # normalize eval metrics
         eval_metrics = {
-            key: torch.mean(torch.concatenate([d[key] for d in eval_metrics])) for key in eval_metrics[0]
+            key: torch.mean(stack([d[key] for d in eval_metrics])) for key in eval_metrics[0]
         }
         try:
             eval_metrics["perplexity"] = math.exp(eval_metrics["ce_loss"])
