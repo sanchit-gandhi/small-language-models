@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
 
-MODEL_ID="sanchit-gandhi/distil-mistral-1.5B-Instruct-v0.2"
+MODEL_ID="sanchit-gandhi/distil-mistral-1.5B-v0.1-fineweb-checkpoint-15000"
+BATCH_SIZE=16
 
-accelerate launch run_evals_accelerate.py \
-    --model_args "pretrained=${MODEL_ID}" \
-    --tasks ./subset_cosmo_tasks.txt \
-    --override_batch_size 8 \
-    --output_dir "./intermediate-results"
-
-accelerate launch run_evals_accelerate.py \
+accelerate launch --num_processes=1 --gpu_ids="2" run_evals_accelerate.py \
     --model_args "pretrained=${MODEL_ID}" \
     --tasks ./all_cosmo_tasks.txt \
-    --override_batch_size 8 \
-    --output_dir "./"
+    --override_batch_size ${BATCH_SIZE} \
+    --use_chat_template \
+    --output_dir "./cosmo"
