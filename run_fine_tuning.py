@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Training langauge models for conditional language modelling tasks via teacher-student distillation.
+Training langauge models for conditional language modelling tasks..
 """
-# You can also adapt this script for your own distillation tasks. Pointers for this are left as comments.
+# You can also adapt this script for your own fine-tuning tasks. Pointers for this are left as comments.
 
 import logging
 import math
@@ -83,9 +83,6 @@ class ModelArguments:
     model_name_or_path: str = field(
         metadata={"help": "Path to pretrained Whisper model or model identifier from huggingface.co/models"}
     )
-    teacher_model_name_or_path: str = field(
-        metadata={"help": "Path to pretrained teacher model or model identifier from huggingface.co/models"}
-    )
     config_name: Optional[str] = field(
         default=None,
         metadata={"help": "Pretrained config name or path if not the same as model_name"},
@@ -133,12 +130,10 @@ class ModelArguments:
             )
         },
     )
-    load_teacher_in_8bit: bool = field(default=False, metadata={"help": "Use 8 bit precision for the teacher model."})
-    load_teacher_in_4bit: bool = field(default=False, metadata={"help": "Use 4 bit precision for the teacher model."})
-    load_student_in_8bit: bool = field(default=False, metadata={"help": "Use 8 bit precision for the student model."})
-    load_student_in_4bit: bool = field(default=False, metadata={"help": "Use 4 bit precision for the student model."})
+    load_in_8bit: bool = field(default=False, metadata={"help": "Use 8 bit precision for the student model."})
+    load_in_4bit: bool = field(default=False, metadata={"help": "Use 4 bit precision for the student model."})
     bnb_4bit_quant_type: Optional[str] = field(
-        default="nf4", metadata={"help": "Quantization type if the teacher is quantized (fp4 or nf4)"}
+        default="nf4", metadata={"help": "Quantization type if the model is quantized (fp4 or nf4)"}
     )
     use_bnb_nested_quant: bool = field(default=False, metadata={"help": "Whether or not to use nested quantization."})
     lora_r: Optional[int] = field(
@@ -310,18 +305,6 @@ class DataTrainingArguments:
 class DistillationTrainingArguments(Seq2SeqTrainingArguments):
     freeze_lm_head: Optional[bool] = field(
         default=False, metadata={"help": "Whether to freeze the LM head of the student model."}
-    )
-    temperature: Optional[float] = field(
-        default=2.0, metadata={"help": "Temperature to anneal the logits when computing the softmax."}
-    )
-    kl_weight: Optional[float] = field(
-        default=1.0,
-        metadata={
-            "help": (
-                "Weighting assigned to the MSE loss in the KD formulation. MSE loss is "
-                "computed between the teacher-student hidden states and attentions."
-            )
-        },
     )
     output_router_logits: Optional[bool] = field(
         default=False,
@@ -697,31 +680,19 @@ def get_parameter_names(model, forbidden_layer_types, forbidden_module=None):
 def get_quantization_config(
     model_args: ModelArguments, torch_dtype: torch.dtype
 ) -> tuple[BitsAndBytesConfig | None, BitsAndBytesConfig | None]:
-    if model_args.load_teacher_in_4bit:
-        quantization_config_teacher = BitsAndBytesConfig(
+    if model_args.load_in_4bit:
+        quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch_dtype,
             bnb_4bit_quant_type=model_args.bnb_4bit_quant_type,
             bnb_4bit_use_double_quant=model_args.use_bnb_nested_quant,
         )
-    elif model_args.load_teacher_in_8bit:
-        quantization_config_teacher = BitsAndBytesConfig(load_in_8bit=True)
+    elif model_args.load_in_8bit:
+        quantization_config = BitsAndBytesConfig(load_in_8bit=True)
     else:
-        quantization_config_teacher = None
+        quantization_config = None
 
-    if model_args.load_student_in_4bit:
-        quantization_config_student = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch_dtype,
-            bnb_4bit_quant_type=model_args.bnb_4bit_quant_type,
-            bnb_4bit_use_double_quant=model_args.use_bnb_nested_quant,
-        )
-    elif model_args.load_student_in_8bit:
-        quantization_config_student = BitsAndBytesConfig(load_in_8bit=True)
-    else:
-        quantization_config_student = None
-
-    return quantization_config_teacher, quantization_config_student
+    return quantization_config
 
 
 def main():
@@ -747,13 +718,13 @@ def main():
     # it to accelerate format
     if training_args.dtype == "float16":
         mixed_precision = "fp16"
-        teacher_dtype = torch.float16
+        torch_dtype = torch.float16
     elif training_args.dtype == "bfloat16":
         mixed_precision = "bf16"
-        teacher_dtype = torch.bfloat16
+        torch_dtype = torch.bfloat16
     else:
         mixed_precision = "no"
-        teacher_dtype = torch.float32
+        torch_dtype = torch.float32
 
     accelerator = Accelerator(
         gradient_accumulation_steps=training_args.gradient_accumulation_steps,
@@ -767,7 +738,6 @@ def main():
         config={
             "learning_rate": training_args.learning_rate,
             "model_name_or_path": model_args.model_name_or_path,
-            "teacher_name_or_path": model_args.teacher_model_name_or_path,
             "num_train_epochs": training_args.num_train_epochs,
             "max_steps": training_args.max_steps,
             "gradient_accumulation_steps": training_args.gradient_accumulation_steps,
@@ -944,36 +914,22 @@ def main():
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    quantization_config_teacher, quantization_config_student = get_quantization_config(
-        model_args, torch_dtype=teacher_dtype
-    )
+    quantization_config = get_quantization_config(model_args, torch_dtype)
 
-    # The teacher model can safely be cast to the dtype of training since we don't
-    # update the params
-    teacher_model = AutoModelForCausalLM.from_pretrained(
-        model_args.teacher_model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        token=model_args.token,
-        low_cpu_mem_usage=True,
-        torch_dtype=teacher_dtype,
-        attn_implementation=model_args.attn_implementation,
-        quantization_config=quantization_config_teacher,
-    )
-
-    student_model = AutoModelForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         config=config,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         subfolder=model_args.subfolder,
         token=model_args.token,
-        torch_dtype=teacher_dtype,
+        torch_dtype=torch_dtype,
         low_cpu_mem_usage=True,
         attn_implementation=model_args.attn_implementation,
-        quantization_config=quantization_config_student,
+        quantization_config=quantization_config,
     )
 
-    if quantization_config_student is not None:
+    if quantization_config is not None:
         lora_config = LoraConfig(
             r=model_args.lora_r,
             lora_alpha=model_args.lora_alpha,
@@ -982,18 +938,17 @@ def main():
             bias="none",
             task_type="CAUSAL_LM",
         )
-        student_model = get_peft_model(student_model, lora_config)
+        model = get_peft_model(model, lora_config)
 
-    if student_model.generation_config.bos_token_id is None or teacher_model.generation_config.bos_token_id is None:
+    if model.generation_config.bos_token_id is None:
         raise ValueError(
-            f"Make sure that `generation_config.bos_token_id` is correctly defined for both the "
-            f"student and teacher model. Got {student_model.generation_config.bos_token_id} for the "
-            f"student and {teacher_model.generation_config.bos_token_id} for the teacher."
+            f"Make sure that `generation_config.bos_token_id` is correctly defined. "
+            f"Got {model.generation_config.bos_token_id}."
         )
 
     # enable gradient checkpointing if necessary
     if training_args.gradient_checkpointing:
-        student_model.gradient_checkpointing_enable()
+        model.gradient_checkpointing_enable()
 
     def set_trainable_parameters(module, requires_grad=False):
         for param in module.parameters():
@@ -1002,16 +957,16 @@ def main():
 
     # freeze student lm head if necessary
     if training_args.freeze_lm_head:
-        set_trainable_parameters(student_model.lm_head, requires_grad=False)
+        set_trainable_parameters(model.lm_head, requires_grad=False)
 
-    student_model.generation_config.max_length = data_args.max_label_length
+    model.generation_config.max_length = data_args.max_label_length
 
     # 8. Save all pre-processed tokenizers/config/generation configs
     if accelerator.is_main_process:
         tokenizer.save_pretrained(training_args.output_dir)
         # save the config and generation config as well
         config.save_pretrained(training_args.output_dir)
-        student_model.generation_config.save_pretrained(training_args.output_dir)
+        model.generation_config.save_pretrained(training_args.output_dir)
 
     accelerator.wait_for_everyone()
 
@@ -1191,17 +1146,17 @@ def main():
 
     # 13. Define optimizer, LR scheduler, collator
     decay_parameters = get_parameter_names(
-        student_model,
+        model,
         [nn.LayerNorm],
     )
     decay_parameters = [name for name in decay_parameters if "bias" not in name]
     optimizer_grouped_parameters = [
         {
-            "params": [param for name, param in student_model.named_parameters() if name in decay_parameters],
+            "params": [param for name, param in model.named_parameters() if name in decay_parameters],
             "weight_decay": training_args.weight_decay,
         },
         {
-            "params": [param for name, param in student_model.named_parameters() if name not in decay_parameters],
+            "params": [param for name, param in model.named_parameters() if name not in decay_parameters],
             "weight_decay": 0.0,
         },
     ]
@@ -1232,77 +1187,29 @@ def main():
     num_beams = (
         training_args.generation_num_beams
         if training_args.generation_num_beams is not None
-        else getattr(student_model.generation_config, "num_beams", 1)
+        else getattr(model.generation_config, "num_beams", 1)
     )
 
     # 15. Prepare everything with accelerate
-    student_model, teacher_model, optimizer, lr_scheduler = accelerator.prepare(
-        student_model, teacher_model, optimizer, lr_scheduler
-    )
-
-    def kl_divergence(target_distribution, log_predicted_distribution, labels):
-        kl_loss = nn.KLDivLoss(reduction="none")
-        divergence = kl_loss(log_predicted_distribution, target_distribution)
-        # ignore padded tokens from divergence, i.e. where labels are not set to -100
-        padding_mask = labels >= 0
-        padding_mask = padding_mask.unsqueeze(-1)
-        divergence = divergence * padding_mask
-        # take the average over the mini-batch
-        divergence = divergence.sum() / padding_mask.sum()
-        return divergence
+    model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
 
     # Define gradient update step fn
-    def train_step(
-        batch,
-        temperature=2.0,
-    ):
-        student_model.train()
-        teacher_model.eval()
-
-        student_outputs = student_model(**batch)
-        with torch.no_grad():
-            teacher_outputs = teacher_model(**batch)
-
-        # CE (data) loss
-        ce_loss = student_outputs.loss
-        # rescale distribution by temperature to ensure gradients scale correctly
-        teacher_distribution = nn.functional.softmax(teacher_outputs.logits / temperature, dim=-1)
-        # log softmax of student predictions for numerical stability
-        student_distribution = nn.functional.log_softmax(student_outputs.logits / temperature, dim=-1)
-        # KL-divergence loss (scaled by temperature)
-        kl_loss = kl_divergence(teacher_distribution, student_distribution, batch["labels"]) * temperature**2
-
-        # use Distil-Whisper formulation (fix weight of CE loss and tune KL weight)
-        loss = 0.8 * ce_loss + training_args.kl_weight * kl_loss
-        metrics = {"loss": loss, "ce_loss": ce_loss, "kl_loss": kl_loss}
+    def train_step(batch):
+        model.train()
+        loss = model(**batch).loss
+        metrics = {"loss": loss, "ce_loss": loss}
         return loss, metrics
 
     # Define eval fn
     def eval_step(batch):
-        student_model.eval()
-        teacher_model.eval()
-
+        model.eval()
         with torch.no_grad():
-            student_outputs = student_model(**batch)
-            teacher_outputs = teacher_model(**batch)
-
-        # CE (data) loss
-        ce_loss = student_outputs.loss
-
-        # log softmax / softmax for numerical stability
-        student_distribution = nn.functional.log_softmax(student_outputs.logits, dim=-1)
-        teacher_distribution = nn.functional.softmax(teacher_outputs.logits, dim=-1)
-        # temperature is always 1 for eval
-        kl_loss = kl_divergence(teacher_distribution, student_distribution, batch["labels"])
-
-        # use Distil-Whisper formulation (fix weight of CE loss and tune KL weight)
-        loss = 0.8 * ce_loss + training_args.kl_weight * kl_loss
-        metrics = {"loss": loss, "ce_loss": ce_loss, "kl_loss": kl_loss}
+            loss = model(**batch).loss
+        metrics = {"loss": loss, "ce_loss": loss}
         return metrics
 
     def generate_step(batch):
-        student_model.eval()
-        output_ids = accelerator.unwrap_model(student_model).generate(
+        output_ids = accelerator.unwrap_model(model).generate(
             **batch, max_length=max_label_length, num_beams=num_beams
         )
         output_ids = accelerator.pad_across_processes(output_ids, dim=1, pad_index=tokenizer.pad_token_id)
@@ -1384,11 +1291,11 @@ def main():
             resume_step = None
 
         for batch in train_dataloader:
-            with accelerator.accumulate(student_model):
-                loss, train_metric = train_step(batch, temperature=training_args.temperature)
+            with accelerator.accumulate(model):
+                loss, train_metric = train_step(batch)
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(student_model.parameters(), training_args.max_grad_norm)
+                    accelerator.clip_grad_norm_(model.parameters(), training_args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -1419,7 +1326,7 @@ def main():
                     accelerator.wait_for_everyone()
                     intermediate_dir = os.path.join(training_args.output_dir, f"checkpoint-{cur_step}-epoch-{epoch}")
                     accelerator.save_state(output_dir=intermediate_dir)
-                    unwrapped_model = accelerator.unwrap_model(student_model)
+                    unwrapped_model = accelerator.unwrap_model(model)
                     unwrapped_model.save_pretrained(
                         intermediate_dir,
                         is_main_process=accelerator.is_main_process,
@@ -1438,7 +1345,7 @@ def main():
 
                 if training_args.do_eval and (cur_step % eval_steps == 0 or cur_step == total_train_steps):
                     train_time += time.time() - train_start
-                    student_model.eval()
+                    model.eval()
                     # ======================== Evaluating ==============================
                     for eval_split in all_eval_splits:
                         eval_metrics = []
@@ -1523,8 +1430,8 @@ def main():
                 if cur_step == total_train_steps:
                     accelerator.wait_for_everyone()
                     # un-wrap student model for save
-                    student_model = accelerator.unwrap_model(student_model)
-                    student_model.save_pretrained(
+                    model = accelerator.unwrap_model(model)
+                    model.save_pretrained(
                         training_args.output_dir,
                         is_main_process=accelerator.is_main_process,
                         save_function=accelerator.save,
