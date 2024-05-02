@@ -11,11 +11,9 @@ accelerate launch --multi_gpu --num_processes=8 --gpu_ids="all" run_distillation
 	--preprocessing_num_workers "32" \
 	--do_train \
   --do_eval \
-	--max_train_samples 1000 \
-  --num_train_epochs 2000 \
-  --max_eval_samples 1000 \
-  --learning_rate 1e-3 \
-  --warmup_steps 0 \
+	--max_train_samples 100 \
+  --num_train_epochs 2 \
+  --max_eval_samples 100 \
   --per_device_eval_batch_size 8 \
   --per_device_train_batch_size 8 \
   --save_strategy "no" \
