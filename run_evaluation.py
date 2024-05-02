@@ -187,7 +187,7 @@ class DataTrainingArguments:
         metadata={"help": "The name of the dataset column containing the prompt data in the evaluation set."},
     )
     max_label_length: int = field(
-        default=2048,
+        default=4096,
         metadata={"help": "Truncate target labels that are longer `max_label_length` tokens."},
     )
     pad_target_to_multiple_of: Optional[int] = field(
