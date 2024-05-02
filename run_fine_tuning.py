@@ -749,7 +749,6 @@ def main():
             "weight_decay": training_args.weight_decay,
             "adam_beta1": training_args.adam_beta1,
             "adam_beta2": training_args.adam_beta2,
-            "temperature": training_args.temperature,
         },
     )
 

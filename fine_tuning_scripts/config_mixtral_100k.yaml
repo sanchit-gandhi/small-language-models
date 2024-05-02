@@ -1,0 +1,33 @@
+# Model arguments
+model_name_or_path: sanchit-gandhi/mixtral-8x1.5B-Instruct-v0.1
+tokenizer_name: mistralai/Mistral-7B-Instruct-v0.2
+dtype: bfloat16
+
+# Data arguments
+train_dataset_name: HuggingFaceTB/cosmopedia-100k
+train_dataset_config_name: default
+train_split_name: train[1000:]
+eval_split_name: train[:1000]
+prompt_column_name: prompt
+eval_prompt_column_name: prompt
+num_train_epochs: 10
+max_label_length: 4096
+
+# Training arguments
+do_train: true
+do_eval: true
+per_device_eval_batch_size: 32
+per_device_train_batch_size: 32
+learning_rate: 0.0001
+warmup_steps: 500
+gradient_checkpointing: true
+dataloader_num_workers: 4
+preprocessing_num_workers: 32
+ddp_timeout: 7200
+save_strategy: epoch
+evaluation_strategy: epoch
+logging_steps: 25
+overwrite_output_dir: true
+output_router_logits: true
+report_to: wandb
+output_dir: ./
