@@ -330,6 +330,10 @@ def main():
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
         model_args, data_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    elif len(sys.argv) == 2 and sys.argv[1].endswith(".yaml"):
+        # If we pass only one argument to the script and it's the path to a yaml file,
+        # let's parse it to get our arguments.
+        model_args, data_args = parser.parse_yaml_file(yaml_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args = parser.parse_args_into_dataclasses()
 
@@ -525,10 +529,12 @@ def main():
                 progress_bar.update(1)
 
                 if (cur_step % data_args.save_steps == 0) or (cur_step == total_inference_steps):
-                    save_checkpoint(split_output_dir, all_logprobs, cur_step)
-                    rotate_checkpoints(data_args.save_total_limit, output_dir=split_output_dir)
+                    if accelerator.is_main_process:
+                        save_checkpoint(split_output_dir, all_logprobs, cur_step)
+                        rotate_checkpoints(data_args.save_total_limit, output_dir=split_output_dir)
 
-        vectorized_datasets[split] = vectorized_datasets[split].add_column("logprobs", all_logprobs)
+        with accelerator.main_process_first():
+            vectorized_datasets[split] = vectorized_datasets[split].add_column("logprobs", all_logprobs)
 
     if accelerator.is_main_process:
         vectorized_datasets.save_to_disk(data_args.output_dir)
