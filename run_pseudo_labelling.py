@@ -5,17 +5,19 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 
+import numpy as np
 import torch
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from datasets import DatasetDict, load_dataset
+from torch import nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
-    HfArgumentParser,
+    HfArgumentParser, PreTrainedTokenizerBase, BatchEncoding,
 )
 
 
@@ -25,7 +27,7 @@ logger = get_logger(__name__, log_level="INFO")
 @dataclass
 class ModelArguments:
     """
-    Arguments pertaining to what data we are going to input our model for training and eval.
+    Arguments pertaining to what data we are going to input our model for eval.
     """
 
     model_name_or_path: str = field(
@@ -88,12 +90,8 @@ class ModelArguments:
             "help": "Whether or not to use an authentication token when loading/uploading from the Hugging Face Hub"
         },
     )
-    do_sample: Optional[bool] = field(default=True, metadata={"help": "Whether to use sampling mode for generation"})
     temperature: Optional[float] = field(default=0.6, metadata={"help": "Temperature for sampling-based generation"})
-    max_new_tokens: Optional[int] = field(
-        default=256, metadata={"help": "Maximum number of new tokens during generation"}
-    )
-    compile_generate: Optional[bool] = field(
+    torch_compile: Optional[bool] = field(
         default=False, metadata={"help": "Whether to compile the forward pass (not sampling) in generate."}
     )
 
@@ -130,6 +128,18 @@ class DataArguments:
         default=None,
         metadata={"help": "Maximum number of samples for generation - use for debugging purposes."},
     )
+    text_column_name: str = field(
+        default="text",
+        metadata={"help": "The name of the dataset column containing the generated text data in the training set."},
+    )
+    prompt_column_name: str = field(
+        default="prompt",
+        metadata={"help": "The name of the dataset column containing the prompt data. Defaults to 'prompt'"},
+    )
+    max_label_length: int = field(
+        default=4096,
+        metadata={"help": "Truncate target labels that are longer `max_label_length` tokens."},
+    )
     overwrite_cache: bool = field(
         default=False,
         metadata={"help": "Overwrite the cached training and evaluation sets"},
@@ -155,10 +165,6 @@ class DataArguments:
         metadata={"help": "Overwrite the content of the output directory each time the script is run."},
     )
 
-    def __post_init__(self):
-        if self.push_to_hub and self.hub_dataset_id is None:
-            raise ValueError("You must specify the `hub_dataset_id` when setting `--push_to_hub=True`")
-
 
 def get_quantization_config(model_args: ModelArguments) -> Union[BitsAndBytesConfig, None]:
     if model_args.load_in_4bit:
@@ -182,47 +188,45 @@ def get_quantization_config(model_args: ModelArguments) -> Union[BitsAndBytesCon
     return quantization_config
 
 
-def get_current_device() -> int:
-    """Get the current device. For GPU we return the local process index to enable multiple GPU training."""
-    return Accelerator().local_process_index if torch.cuda.is_available() else "cpu"
-
-
-def get_kbit_device_map() -> Union[Dict[str, int], None]:
-    """Useful for running inference with quantized models by setting `device_map=get_peft_device_map()`"""
-    return {"": get_current_device()} if torch.cuda.is_available() else None
-
-
 @dataclass
-class DataCollatorWithPadding:
+class DataCollatorCausalLMWithPadding:
     """
-    Data collator that will dynamically pad the inputs received to the longest sequence in the batch.
+    Data collator that will dynamically pad the inputs received.
+    Args:
+        tokenizer ([`PreTrainedTokenizer`])
+            The tokenizer used for tokenizing the data.
+        target_padding (:obj:`bool`, :obj:`str` or :class:`~transformers.tokenization_utils_base.PaddingStrategy`, `optional`, defaults to :obj:`True`):
+            Select a strategy to pad the returned target sequences (according to the model's padding side and padding index).
+            See above for details.
+        max_target_length (:obj:`int`, `optional`):
+            Maximum length of the ``labels`` of the returned list and optionally padding length (see above).
     """
 
-    tokenizer: Any
+    tokenizer: PreTrainedTokenizerBase
+    target_padding: Union[bool, str] = "max_length"
+    max_target_length: Optional[int] = None
 
-    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
-        # split inputs and labels since they have to be of different lengths and need
-        # different padding methods
-        input_ids = {"input_ids": [feature["input_ids"] for feature in features]}
-        batch = self.tokenizer.pad(input_ids, return_tensors="pt", padding="longest", return_attention_mask=True)
+    def __call__(self, features: List[Dict[str, Union[List[int], np.ndarray]]]) -> BatchEncoding:
+        # dataloader returns a list of features which we convert to a dict
+        label_features = {"input_ids": [feature["labels"] for feature in features]}
+        prompt_lengths = [feature["prompt_length"] for feature in features]
+
+        batch = self.tokenizer.pad(
+            label_features,
+            max_length=self.max_target_length,
+            padding=self.target_padding,
+            return_tensors="pt",
+        )
+
+        labels_mask = batch["attention_mask"]
+        # don't include prompts in log-probs calculation
+        for idx in range(len(prompt_lengths)):
+            labels_mask[idx, : prompt_lengths[idx]] = 0
+        # replace padding with -100 to ignore from log-probs correctly
+        labels = batch["input_ids"].masked_fill(labels_mask.ne(1), -100)
+        batch["labels"] = labels
+
         return batch
-
-
-# TODO(SG): add accent keyword
-PROMPT = """You will be given six descriptive keywords related to an audio sample of a person's speech. These keywords include:
-1. The gender (e.g., male, female)
-2. The level of reverberation (e.g., very roomy sounding, quite roomy sounding, slightly roomy sounding, moderate reverberation, slightly confined sounding, quite confined sounding, very confined sounding)
-3. The amount of noise the sample (e.g., very noisy, quite noisy, slightly noisy, moderate ambient sound, slightly clear, quite clear, very clear)
-4. The tone of the speaker's voice (e.g., very monotone, quite monotone, slightly monotone, moderate intonation, slightly expressive, quite expressive, very expressive)
-5. The pace of the speaker's delivery (e.g., very slowly, quite slowly, slightly slowly, moderate speed, slightly fast, quite fast, very fast)
-6. The pitch of the speaker's voice (e.g., very low pitch, quite low pitch, slightly low pitch, moderate pitch, slightly high pitch, quite high pitch, very high pitch)
-
-Your task is to create a text description using these keywords that accurately describes the speech sample while ensuring the description remains grammatically correct and easy to understand. You should rearrange the keyword order as necessary, and substitute synonymous terms where appropriate. If the amount of noise is 'very noisy' and the level of reverberation is 'very roomy sounding', include terms like 'very bad recording' in the description. Likewise, if the amount of noise is 'very clear' and the level of reverberation is 'very confined sounding', include terms like 'very good recording' in the description. Otherwise, do not add extra details beyond what has been provided, and only return the generated description.
-
-For example, given the following keywords: 'female', 'slightly roomy sounding', 'slightly noisy', 'very expressive', 'slightly low pitch', 'very slowly', a valid description would be: 'a woman with a deep voice speaks slowly but has an animated delivery in an echoey room with some background noise'.
-
-For the keywords: '[gender]', '[reverberation]', '[noise]', '[speech_monotony]', '[pitch]', '[speaking_rate]', the corresponding description is:"
-"""
 
 
 def main():
@@ -274,19 +278,11 @@ def main():
             num_proc=data_args.preprocessing_num_workers,
         )
 
-    raw_datasets_features = set(raw_datasets[next(iter(raw_datasets))].features.keys())
+    raw_datasets_features = list(raw_datasets[next(iter(raw_datasets))].features.keys())
 
     if data_args.max_eval_samples is not None:
         for split in raw_datasets:
             raw_datasets[split] = raw_datasets[split].select(range(data_args.max_eval_samples))
-
-    # TODO(SG): add accent
-    EXPECTED_COLUMNS = {"gender", "pitch", "noise", "reverberation", "speech_monotony", "speaking_rate"}
-    if not EXPECTED_COLUMNS.issubset(raw_datasets_features):
-        missing_columns = EXPECTED_COLUMNS - raw_datasets_features
-        raise ValueError(
-            f"Missing columns {missing_columns} from the dataset features. Got dataset features {raw_datasets_features}"
-        )
 
     # 4. Load pre-trained model
     logger.info("*** Load pretrained model ***")
@@ -294,6 +290,8 @@ def main():
         model_args.torch_dtype if model_args.torch_dtype in ["auto", None] else getattr(torch, model_args.torch_dtype)
     )
     quantization_config = get_quantization_config(model_args)
+    current_device = Accelerator().local_process_index if torch.cuda.is_available() else "cpu"
+    device_map = {"": current_device} if (torch.cuda.is_available() and quantization_config) else None
 
     model = AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
@@ -302,32 +300,22 @@ def main():
         trust_remote_code=model_args.trust_remote_code,
         attn_implementation=model_args.attn_implementation,
         torch_dtype=torch_dtype,
-        device_map=get_kbit_device_map() if quantization_config is not None else None,
+        device_map=device_map,
         quantization_config=quantization_config,
         low_cpu_mem_usage=True,
         token=model_args.token,
     ).eval()
 
-    if model_args.compile_generate:
+    if model_args.torch_compile:
+        # torch compile only compatible with gemma and llama
         if not callable(getattr(model, "_setup_cache", None)):
             raise ValueError(
-                f"Static k/v cache is not compatible with the model {model.__class__.__name__}. Set `--compile_generate=False"
+                f"Static k/v cache is not compatible with the model {model.__class__.__name__}. Set `--torch_compile=False"
                 "for dynamic k/v cache"
             )
         model.generation_config.cache_implementation = "static"
-        model._forward = model.forward
-        compiled_forward = torch.compile(model.forward)
-
-        def compiled(func, input_ids, **kwargs):
-            return func(input_ids, **kwargs)
-
-        def call(input_ids, **kwargs):
-            if input_ids.shape[-1] == 1:
-                return compiled(compiled_forward, input_ids, **kwargs)
-
-            return model._forward(input_ids, **kwargs)
-
-        model.forward = call
+        # compile the forward pass (but not the top-{p,k} sampling)
+        model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_name_or_path,
@@ -336,44 +324,58 @@ def main():
         use_fast=model_args.use_fast_tokenizer,
         padding_side="left",
     )
+
+    # define some constants
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.bos_token_id
         model.generation_config.pad_token_id = model.generation_config.eos_token_id
 
-    def prepare_dataset(sample):
-        sample_prompt = PROMPT
-        for key in EXPECTED_COLUMNS:
-            sample_prompt = sample_prompt.replace(f"[{key}]", sample[key])
-        sample_prompt = [{"role": "user", "content": sample_prompt}]
-        token_ids = tokenizer.apply_chat_template(sample_prompt)
-        sample["input_ids"] = token_ids
-        return sample
+    max_label_length = (
+        data_args.max_label_length if data_args.max_label_length is not None else model.config.max_length
+    )
+    text_column_name = data_args.text_column_name
+    prompt_column_name = data_args.prompt_column_name
+    rescale_temperature = model_args.temperature if model_args.temperature > 0.0 else 1
+
+    def prepare_instruction_dataset(example):
+        messages = [
+            {"role": "user", "content": example[prompt_column_name]},
+            {"role": "assistant", "content": example[text_column_name]},
+        ]
+        example["labels"] = tokenizer.apply_chat_template(messages)
+        example["prompt_length"] = len(tokenizer.apply_chat_template([messages[0]]))
+        return example
+
+    def is_labels_in_length_range(labels):
+        return 0 < len(labels) <= max_label_length
 
     with accelerator.main_process_first():
         vectorized_datasets = raw_datasets.map(
-            prepare_dataset, num_proc=data_args.preprocessing_num_workers, desc="Preparing prompts"
+            prepare_instruction_dataset,
+            num_proc=data_args.preprocessing_num_workers,
+            desc="Tokenizing dataset...",
+        )
+        vectorized_datasets = vectorized_datasets.filter(
+            is_labels_in_length_range, num_proc=data_args.preprocessing_num_workers, desc="Filtering dataset..."
         )
 
     # Prepare everything with our `accelerator`
     model = accelerator.prepare(model)
-    data_collator = DataCollatorWithPadding(tokenizer)
+    data_collator = DataCollatorCausalLMWithPadding(
+        tokenizer,
+        target_padding="max_length",
+        max_target_length=max_label_length,
+    )
 
-    def generate_step(batch):
-        output_ids = accelerator.unwrap_model(model).generate(
-            batch["input_ids"],
-            attention_mask=batch["attention_mask"],
-            do_sample=model_args.do_sample,
-            temperature=model_args.temperature,
-            max_new_tokens=model_args.max_new_tokens,
-        )
-        output_ids = accelerator.pad_across_processes(output_ids, dim=1, pad_index=tokenizer.pad_token_id)
-        return output_ids
+    @torch.no_grad()
+    def eval_step(batch):
+        shifted_input_ids = batch.pop("labels")[..., 1:]
+        shifted_logits = model(**batch).logits[..., :-1, :]
 
-    def postprocess_dataset(sample):
-        prompt_text = tokenizer.decode(sample["input_ids"], skip_special_tokens=True)
-        generated_text = tokenizer.decode(sample["generated_ids"], skip_special_tokens=True)
-        sample["text_description"] = generated_text[len(prompt_text) :]
-        return sample
+        logprobs = nn.functional.log_softmax((shifted_logits * rescale_temperature).float(), dim=-1).to(shifted_logits.dtype)
+        logprobs = torch.gather(logprobs, dim=2, index=shifted_input_ids.unsqueeze(-1))
+        sum_logprobs = (logprobs * (shifted_input_ids != -100)).sum(-1)
+        return sum_logprobs
 
     for split in vectorized_datasets:
         data_loader = DataLoader(
@@ -385,21 +387,14 @@ def main():
         )
         data_loader = accelerator.prepare(data_loader)
 
-        all_generated_ids = []
+        all_logprobs = []
         for batch in tqdm(data_loader, disable=not accelerator.is_local_main_process):
-            generated_ids = generate_step(batch)
-            generated_ids = accelerator.gather_for_metrics(generated_ids)
-            all_generated_ids.extend(generated_ids.cpu().numpy())
+            logprobs = eval_step(batch)
+            # drop duplicates in the last batch
+            logprobs = accelerator.gather_for_metrics(logprobs)
+            all_logprobs.extend(logprobs.cpu().numpy())
 
-        vectorized_datasets[split] = vectorized_datasets[split].add_column("generated_ids", all_generated_ids)
-
-        if accelerator.is_main_process:
-            vectorized_datasets[split] = vectorized_datasets[split].map(
-                postprocess_dataset,
-                num_proc=data_args.preprocessing_num_workers,
-                desc="Postprocessing dataset",
-                remove_columns=["input_ids", "generated_ids"],
-            )
+        vectorized_datasets[split] = vectorized_datasets[split].add_column("logprobs", all_logprobs)
 
     if accelerator.is_main_process:
         vectorized_datasets.save_to_disk(data_args.output_dir)
