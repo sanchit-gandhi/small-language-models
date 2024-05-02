@@ -10,6 +10,8 @@ train_dataset_name: HuggingFaceTB/cosmopedia-100k
 train_dataset_config_name: default
 train_split_name: train[1000:]
 eval_split_name: train[:1000]
+prompt_column_name: prompt
+eval_prompt_column_name: prompt
 num_train_epochs: 10
 max_label_length: 4096
 

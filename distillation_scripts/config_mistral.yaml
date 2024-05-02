@@ -17,6 +17,8 @@ train_dataset_config_name:
   - wikihow
 train_split_name: train[1000:]
 eval_split_name: train[:1000]
+prompt_column_name: prompt
+eval_prompt_column_name: prompt
 max_steps: 200000
 max_train_samples: 20000000
 

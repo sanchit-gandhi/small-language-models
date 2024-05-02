@@ -519,7 +519,7 @@ def convert_dataset_str_to_list(
         text_column_names if text_column_names is not None else ["text" for _ in range(len(dataset_names))]
     )
     prompt_column_names = (
-        prompt_column_names if prompt_column_names is not None else ["prompt" for _ in range(len(dataset_names))]
+        prompt_column_names if prompt_column_names is not None else [None for _ in range(len(dataset_names))]
     )
     splits = splits if splits is not None else [default_split for _ in range(len(dataset_names))]
 
@@ -889,7 +889,7 @@ def main():
             )
             if dataset_dict["text_column_name"] != "text":
                 raw_datasets["eval"] = raw_datasets["eval"].rename_column(data_args.eval_text_column_name, "text")
-            if dataset_dict["prompt_column_name"] != "prompt":
+            if dataset_dict["prompt_column_name"] and dataset_dict["prompt_column_name"] != "prompt":
                 raw_datasets["eval"] = raw_datasets["eval"].rename_column(data_args.eval_prompt_column_name, "prompt")
         else:
             # load multiple eval sets
@@ -904,17 +904,19 @@ def main():
                     token=model_args.token,
                     streaming=data_args.streaming,
                 )
-                # make column names consistent (text, audio)
+                # make column names consistent (text, prompt)
+                columns_to_keep = {"text"}
                 if dataset_dict["text_column_name"] != "text":
                     raw_datasets[pretty_name] = raw_datasets[pretty_name].rename_column(
                         dataset_dict["text_column_name"], "text"
                     )
-                if dataset_dict["prompt_column_name"] != "prompt":
+                if dataset_dict["prompt_column_name"] and dataset_dict["prompt_column_name"] != "prompt":
                     raw_datasets[pretty_name] = raw_datasets[pretty_name].rename_column(
                         dataset_dict["prompt_column_name"], "prompt"
                     )
+                    columns_to_keep.add("prompt")
                 raw_datasets[pretty_name] = raw_datasets[pretty_name].remove_columns(
-                    set(raw_datasets[pretty_name].features.keys()) - {"text", "prompt"}
+                    set(raw_datasets[pretty_name].features.keys()) - columns_to_keep
                 )
 
     if not training_args.do_train and not training_args.do_eval:
@@ -1027,6 +1029,12 @@ def main():
         instruction_model = model_args.instruction_model
     else:
         instruction_model = "instruct" in model_args.model_name_or_path.lower()
+    if instruction_model and "prompt" not in raw_datasets_train_features:
+        raise ValueError(
+            "Distilling an instruction model, but training dataset does not contain prompt-response pairs. Ensure"
+            "the dataset includes both prompts and responses, which should be specified with the `--prompt_column_name`"
+            f"and `--text_column_name` arguments respectively. Got the following columns: {' '.join(list(raw_datasets_train_features))}."
+        )
 
     # 10.2: filter based on maximum number of training/evaluation samples
     if training_args.do_train and data_args.max_train_samples is not None:
@@ -1046,10 +1054,12 @@ def main():
 
     # 10.3: pre-process training/evaluation datasets
     def prepare_dataset(example):
-        example["labels"] = tokenizer(example["prompt"] + example["text"]).input_ids
+        prompt = example.get("prompt")
+        target_text = prompt + example["text"] if prompt is not None else example["text"]
+        example["labels"] = tokenizer(target_text).input_ids
         if example["labels"][-1] != eos_token_id:
             example["labels"] += [eos_token_id]
-        example["prompt_length"] = len(tokenizer(example["prompt"]).input_ids)
+        example["prompt_length"] = len(tokenizer(prompt).input_ids) if prompt else 0
         return example
 
     def prepare_instruction_dataset(example):
