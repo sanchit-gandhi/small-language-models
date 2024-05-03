@@ -4,13 +4,15 @@ accelerate launch --multi_gpu --num_processes=8 --gpu_ids="all" run_distillation
   --model_name_or_path "sanchit-gandhi/tiny-random-MistralForCausalLM-1-layer" \
   --teacher_model_name_or_path "sanchit-gandhi/tiny-random-MistralForCausalLM-1-layer" \
   --output_dir "./" \
-  --train_dataset_name "HuggingFaceFW/fineweb" \
-  --train_dataset_config_name "CC-MAIN-2024-10" \
+  --train_dataset_name "HuggingFaceTB/cosmopedia-100k" \
+  --train_dataset_config_name "default" \
 	--train_split_name "train[1000:]" \
 	--eval_split_name "train[:1000]" \
 	--preprocessing_num_workers "32" \
 	--do_train \
   --do_eval \
+  --prompt_column_name "prompt" \
+  --eval_prompt_column_name "prompt" \
 	--max_train_samples 100 \
   --num_train_epochs 2 \
   --max_eval_samples 100 \

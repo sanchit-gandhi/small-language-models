@@ -3,6 +3,7 @@ model_name_or_path: sanchit-gandhi/Mistral-1.5B-Instruct-v0.2
 teacher_model_name_or_path: mistralai/Mistral-7B-Instruct-v0.2
 dtype: bfloat16
 load_teacher_in_4bit: true
+optim: adamw_bnb_8bit
 
 # Data arguments
 train_dataset_name: HuggingFaceTB/cosmopedia-100k
@@ -16,8 +17,8 @@ num_train_epochs: 10
 # Training arguments
 do_train: true
 do_eval: true
-per_device_eval_batch_size: 8
-per_device_train_batch_size: 8
+per_device_eval_batch_size: 16
+per_device_train_batch_size: 16
 max_label_length: 4096
 learning_rate: 0.0003
 warmup_steps: 500

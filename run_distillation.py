@@ -84,7 +84,8 @@ class ModelArguments:
     model_name_or_path: str = field(
         metadata={"help": "Path to pretrained Whisper model or model identifier from huggingface.co/models"}
     )
-    teacher_model_name_or_path: str = field(
+    teacher_model_name_or_path: Optional[str] = field(
+        default=None,
         metadata={"help": "Path to pretrained teacher model or model identifier from huggingface.co/models"}
     )
     config_name: Optional[str] = field(
@@ -952,17 +953,20 @@ def main():
         model_args, torch_dtype=teacher_dtype
     )
 
-    # The teacher model can safely be cast to the dtype of training since we don't
-    # update the params
-    teacher_model = AutoModelForCausalLM.from_pretrained(
-        model_args.teacher_model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        token=model_args.token,
-        low_cpu_mem_usage=True,
-        torch_dtype=teacher_dtype,
-        attn_implementation=model_args.attn_implementation,
-        quantization_config=quantization_config_teacher,
-    )
+    if model_args.teacher_model_name_or_path:
+        # The teacher model can safely be cast to the dtype of training since we don't
+        # update the params
+        teacher_model = AutoModelForCausalLM.from_pretrained(
+            model_args.teacher_model_name_or_path,
+            cache_dir=model_args.cache_dir,
+            token=model_args.token,
+            low_cpu_mem_usage=True,
+            torch_dtype=teacher_dtype,
+            attn_implementation=model_args.attn_implementation,
+            quantization_config=quantization_config_teacher,
+        ).eval()
+    else:
+        teacher_model = None
 
     student_model = AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
@@ -987,12 +991,10 @@ def main():
         )
         student_model = get_peft_model(student_model, lora_config)
 
-    if student_model.generation_config.bos_token_id is None or teacher_model.generation_config.bos_token_id is None:
-        raise ValueError(
-            f"Make sure that `generation_config.bos_token_id` is correctly defined for both the "
-            f"student and teacher model. Got {student_model.generation_config.bos_token_id} for the "
-            f"student and {teacher_model.generation_config.bos_token_id} for the teacher."
-        )
+    if student_model.generation_config.bos_token_id is None or (teacher_model and teacher_model.generation_config.bos_token_id is None):
+        student_error = f"Make sure that `generation_config.bos_token_id` is correctly defined. Got {student_model.generation_config.bos_token_id} for the student."
+        teacher_error = f"Got {teacher_model.generation_config.bos_token_id} for the teacher." if teacher_model else None
+        raise ValueError(student_error + teacher_error)
 
     # enable gradient checkpointing if necessary
     if training_args.gradient_checkpointing:
@@ -1224,7 +1226,7 @@ def main():
         optim_cls = bnb.optim.Adam8bit
     else:
         raise ValueError(
-            f"Got invalid `--optim` {training_args.optim}, should be one of `['adam_torch', 'adam_bnb_8bit']`."
+            f"Got invalid `--optim` {training_args.optim}, should be one of `['adam_torch', 'adamw_bnb_8bit']`."
         )
 
     optimizer = optim_cls(
@@ -1258,9 +1260,8 @@ def main():
     )
 
     # 15. Prepare everything with accelerate
-    student_model, teacher_model, optimizer, lr_scheduler = accelerator.prepare(
-        student_model, teacher_model, optimizer, lr_scheduler
-    )
+    student_model, optimizer, lr_scheduler = accelerator.prepare(student_model, optimizer, lr_scheduler)
+    teacher_model = accelerator.prepare(teacher_model) if teacher_model else None
 
     def kl_divergence(target_distribution, log_predicted_distribution, labels):
         kl_loss = nn.KLDivLoss(reduction="none")
@@ -1279,51 +1280,57 @@ def main():
         temperature=2.0,
     ):
         student_model.train()
-        teacher_model.eval()
-
         student_outputs = student_model(**batch)
-        with torch.no_grad():
-            teacher_outputs = teacher_model(**batch)
 
         # CE (data) loss
         ce_loss = student_outputs.loss
-        # rescale distribution by temperature to ensure gradients scale correctly
-        teacher_distribution = nn.functional.softmax(teacher_outputs.logits / temperature, dim=-1)
-        # log softmax of student predictions for numerical stability
-        student_distribution = nn.functional.log_softmax(student_outputs.logits / temperature, dim=-1)
-        # KL-divergence loss (scaled by temperature)
-        kl_loss = kl_divergence(teacher_distribution, student_distribution, batch["labels"]) * temperature**2
+        metrics = {"ce_loss": ce_loss}
 
-        # use Distil-Whisper formulation (fix weight of CE loss and tune KL weight)
-        loss = 0.8 * ce_loss + training_args.kl_weight * kl_loss
-        metrics = {"loss": loss, "ce_loss": ce_loss, "kl_loss": kl_loss}
+        if teacher_model:
+            with torch.no_grad():
+                teacher_outputs = teacher_model(**batch)
+            # rescale distribution by temperature to ensure gradients scale correctly
+            teacher_distribution = nn.functional.softmax(teacher_outputs.logits / temperature, dim=-1)
+            # log softmax of student predictions for numerical stability
+            student_distribution = nn.functional.log_softmax(student_outputs.logits / temperature, dim=-1)
+            # KL-divergence loss (scaled by temperature)
+            kl_loss = kl_divergence(teacher_distribution, student_distribution, batch["labels"]) * temperature ** 2
+            # use Distil-Whisper formulation (fix weight of CE loss and tune KL weight)
+            loss = 0.8 * ce_loss + training_args.kl_weight * kl_loss
+            metrics["kl_loss"] = kl_loss
+        else:
+            loss = ce_loss
+
+        metrics["loss"] = loss
         return loss, metrics
 
     # Define eval fn
+    @torch.no_grad()
     def eval_step(batch):
         student_model.eval()
-        teacher_model.eval()
-
-        with torch.no_grad():
-            student_outputs = student_model(**batch)
-            teacher_outputs = teacher_model(**batch)
 
         # CE (data) loss
+        student_outputs = student_model(**batch)
         ce_loss = student_outputs.loss
+        metrics = {"ce_loss": ce_loss}
 
-        # log softmax / softmax for numerical stability
-        student_distribution = nn.functional.log_softmax(student_outputs.logits, dim=-1)
-        teacher_distribution = nn.functional.softmax(teacher_outputs.logits, dim=-1)
-        # temperature is always 1 for eval
-        kl_loss = kl_divergence(teacher_distribution, student_distribution, batch["labels"])
+        if teacher_model:
+            teacher_outputs = teacher_model(**batch)
+            # log softmax / softmax for numerical stability
+            student_distribution = nn.functional.log_softmax(student_outputs.logits, dim=-1)
+            teacher_distribution = nn.functional.softmax(teacher_outputs.logits, dim=-1)
+            # temperature is always 1 for eval
+            kl_loss = kl_divergence(teacher_distribution, student_distribution, batch["labels"])
+            # use Distil-Whisper formulation (fix weight of CE loss and tune KL weight)
+            loss = 0.8 * ce_loss + training_args.kl_weight * kl_loss
+            metrics["kl_loss"] = kl_loss
+        else:
+            loss = ce_loss
 
-        # use Distil-Whisper formulation (fix weight of CE loss and tune KL weight)
-        loss = 0.8 * ce_loss + training_args.kl_weight * kl_loss
-        metrics = {"loss": loss, "ce_loss": ce_loss, "kl_loss": kl_loss}
+        metrics["loss"] = loss
         return metrics
 
     def generate_step(batch):
-        student_model.eval()
         output_ids = accelerator.unwrap_model(student_model).generate(
             **batch, max_length=max_label_length, num_beams=num_beams
         )
