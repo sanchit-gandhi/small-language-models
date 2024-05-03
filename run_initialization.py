@@ -128,7 +128,6 @@ def main():
 
     if model_args.initialization_strategy == "maximally_spaced":
         decoder_mapping = np.linspace(0, teacher_hidden_layers - 1, student_config.num_hidden_layers, dtype=int)
-        decoder_mapping[-1] = teacher_hidden_layers - 1
     elif model_args.initialization_strategy == "first_n":
         decoder_mapping = np.arange(0, student_config.num_hidden_layers)
     else:
@@ -136,6 +135,8 @@ def main():
             f"Got invalid initialization_strategy strategy '{model_args.initialization_strategy}', should be one of "
             "'maximally_spaced` or `first_n`."
         )
+    # always use the last teacher layer as the last student layer
+    decoder_mapping[-1] = teacher_hidden_layers - 1
 
     decoder_map = {}
     for student_layer, teacher_layer in enumerate(decoder_mapping):

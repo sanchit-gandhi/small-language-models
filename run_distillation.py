@@ -60,8 +60,9 @@ from transformers import (
     PreTrainedTokenizerBase,
     Seq2SeqTrainingArguments,
     get_scheduler,
-    set_seed,
+    set_seed, is_bitsandbytes_available,
 )
+from transformers.training_args import OptimizerNames
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
@@ -308,8 +309,11 @@ class DataTrainingArguments:
 
 @dataclass
 class DistillationTrainingArguments(Seq2SeqTrainingArguments):
-    freeze_lm_head: Optional[bool] = field(
-        default=False, metadata={"help": "Whether to freeze the LM head of the student model."}
+    freeze_embeddings: Optional[bool] = field(
+        default=False, metadata={"help": "Whether to freeze the input and output embeddings of the student model."}
+    )
+    freeze_n_layers: Optional[int] = field(
+        default=None, metadata={"help": "Freeze the first n layers of the student model."}
     )
     temperature: Optional[float] = field(
         default=2.0, metadata={"help": "Temperature to anneal the logits when computing the softmax."}
@@ -967,7 +971,6 @@ def main():
         revision=model_args.model_revision,
         subfolder=model_args.subfolder,
         token=model_args.token,
-        torch_dtype=teacher_dtype,
         low_cpu_mem_usage=True,
         attn_implementation=model_args.attn_implementation,
         quantization_config=quantization_config_student,
@@ -1001,8 +1004,13 @@ def main():
         module._requires_grad = requires_grad
 
     # freeze student lm head if necessary
-    if training_args.freeze_lm_head:
-        set_trainable_parameters(student_model.lm_head, requires_grad=False)
+    if training_args.freeze_embeddings:
+        set_trainable_parameters(student_model.get_output_embeddings(), requires_grad=False)
+        set_trainable_parameters(student_model.get_input_embeddings(), requires_grad=False)
+
+    if training_args.freeze_n_layers:
+        for i in range(int(training_args.freeze_n_layers)):
+            set_trainable_parameters(student_model.model.layers[i], requires_grad=False)
 
     student_model.generation_config.max_length = data_args.max_label_length
 
@@ -1204,11 +1212,26 @@ def main():
             "weight_decay": 0.0,
         },
     ]
-    optimizer = torch.optim.AdamW(
-        params=optimizer_grouped_parameters,
-        lr=training_args.learning_rate,
-        betas=(training_args.adam_beta1, training_args.adam_beta2),
-        eps=training_args.adam_epsilon,
+    if training_args.optim == OptimizerNames.ADAMW_TORCH:
+        optim_cls = torch.optim.AdamW
+    elif training_args.optim == OptimizerNames.ADAMW_BNB:
+        if not is_bitsandbytes_available():
+            raise ValueError(
+                "bitsandbytes package required for Adam8bit. Install via: `pip install --upgrade bitsandbytes`"
+            )
+        import bitsandbytes as bnb
+
+        optim_cls = bnb.optim.Adam8bit
+    else:
+        raise ValueError(
+            f"Got invalid `--optim` {training_args.optim}, should be one of `['adam_torch', 'adam_bnb_8bit']`."
+        )
+
+    optimizer = optim_cls(
+        params = optimizer_grouped_parameters,
+        lr = training_args.learning_rate,
+        betas = (training_args.adam_beta1, training_args.adam_beta2),
+        eps = training_args.adam_epsilon,
     )
 
     # LR scheduler gets stepped by `num_processes` each time -> account for this in warmup / total steps
