@@ -4,6 +4,8 @@ teacher_model_name_or_path: mistralai/Mistral-7B-Instruct-v0.2
 dtype: bfloat16
 load_teacher_in_4bit: true
 optim: adamw_bnb_8bit
+freeze_embeddings: true
+freeze_n_layers: 4
 
 # Data arguments
 train_dataset_name: HuggingFaceTB/cosmopedia-100k
@@ -17,12 +19,13 @@ num_train_epochs: 10
 # Training arguments
 do_train: true
 do_eval: true
-per_device_eval_batch_size: 16
-per_device_train_batch_size: 16
+per_device_eval_batch_size: 4
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 2
 max_label_length: 4096
 learning_rate: 0.0003
 warmup_steps: 500
-gradient_checkpointing: true
+gradient_checkpointing: false
 dataloader_num_workers: 4
 preprocessing_num_workers: 32
 ddp_timeout: 7200
