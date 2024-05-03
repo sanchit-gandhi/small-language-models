@@ -1,0 +1,14 @@
+model_name_or_path: mistralai/Mixtral-8x7B-Instruct-v0.1
+load_in_4bit: true
+per_device_eval_batch_size: 16
+
+dataset_name: HuggingFaceTB/cosmopedia_web_textbooks
+dataset_config_name: default
+dataset_split_name: train
+preprocessing_num_workers: 32
+max_eval_samples: 5000000
+
+output_dir: ./cosmopedia_web_textbooks_logprobs
+push_to_hub: true
+report_to: wandb
+wandb_project: distil-mixtral-logprobs

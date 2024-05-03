@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=distil-mistral
+#SBATCH --job-name=distil-mixtral
 #SBATCH --nodes=1
 # set 24h for job wall time limit
 #SBATCH --time=48:00:00
@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
 #SBATCH --partition=hopper-prod
-#SBATCH --output=/fsx/sanchit/logs/%x-%j.out
+#SBATCH --output=/fsx/sanchit/pseudo-label-logs/%x-%j.out
 
 set -x -e
 
