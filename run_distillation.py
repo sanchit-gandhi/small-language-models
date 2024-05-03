@@ -483,6 +483,12 @@ def convert_dataset_str_to_list(
     if isinstance(splits, list) and len(splits) == 1 and len(dataset_config_names) > 1:
         splits = len(dataset_config_names) * splits
 
+    if isinstance(text_column_names, list) and len(text_column_names) == 1 and len(dataset_config_names) > 1:
+        text_column_names = len(dataset_config_names) * text_column_names
+
+    if isinstance(prompt_column_names, list) and len(prompt_column_names) == 1 and len(dataset_config_names) > 1:
+        prompt_column_names = len(dataset_config_names) * prompt_column_names
+
     # basic checks to ensure we've got the right number of datasets/configs/splits/columns/probs
     if dataset_config_names is not None and len(dataset_names) != len(dataset_config_names):
         raise ValueError(
@@ -996,23 +1002,31 @@ def main():
         teacher_error = f"Got {teacher_model.generation_config.bos_token_id} for the teacher." if teacher_model else None
         raise ValueError(student_error + teacher_error)
 
-    # enable gradient checkpointing if necessary
-    if training_args.gradient_checkpointing:
-        student_model.gradient_checkpointing_enable()
-
     def set_trainable_parameters(module, requires_grad=False):
         for param in module.parameters():
             param.requires_grad = requires_grad
         module._requires_grad = requires_grad
 
-    # freeze student lm head if necessary
+    forbidden_module = []
+    # freeze student embeddings if necessary
     if training_args.freeze_embeddings:
         set_trainable_parameters(student_model.get_output_embeddings(), requires_grad=False)
         set_trainable_parameters(student_model.get_input_embeddings(), requires_grad=False)
+        forbidden_module.extend([student_model.get_output_embeddings(), student_model.get_input_embeddings()])
 
     if training_args.freeze_n_layers:
         for i in range(int(training_args.freeze_n_layers)):
             set_trainable_parameters(student_model.model.layers[i], requires_grad=False)
+            forbidden_module.extend([student_model.model.layers[i]])
+
+    # enable gradient checkpointing if necessary
+    if training_args.gradient_checkpointing:
+        if training_args.freeze_embeddings or training_args.freeze_n_layers:
+            raise ValueError(
+                "Gradient checkpointing is not compatible with `--freeze_embeddings` or `--freeze_n_layers`."
+                "Either un-freeze these layers, or set `--gradient_checkpointing=False`."
+            )
+        student_model.gradient_checkpointing_enable()
 
     student_model.generation_config.max_length = data_args.max_label_length
 
@@ -1160,6 +1174,7 @@ def main():
     train_batch_size = per_device_train_batch_size * accelerator.num_processes
     gradient_accumulation_steps = int(training_args.gradient_accumulation_steps)
     per_device_eval_batch_size = int(training_args.per_device_eval_batch_size)
+    temperature = training_args.temperature
 
     # 12.2: Set max training steps
     if not data_args.streaming and training_args.max_steps < 0:
@@ -1202,7 +1217,9 @@ def main():
     decay_parameters = get_parameter_names(
         student_model,
         [nn.LayerNorm],
+        forbidden_module,
     )
+
     decay_parameters = [name for name in decay_parameters if "bias" not in name]
     optimizer_grouped_parameters = [
         {
@@ -1275,10 +1292,7 @@ def main():
         return divergence
 
     # Define gradient update step fn
-    def train_step(
-        batch,
-        temperature=2.0,
-    ):
+    def train_step(batch):
         student_model.train()
         student_outputs = student_model(**batch)
 
@@ -1414,7 +1428,7 @@ def main():
 
         for batch in train_dataloader:
             with accelerator.accumulate(student_model):
-                loss, train_metric = train_step(batch, temperature=training_args.temperature)
+                loss, train_metric = train_step(batch)
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(student_model.parameters(), training_args.max_grad_norm)
