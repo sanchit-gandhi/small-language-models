@@ -347,7 +347,7 @@ def main():
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=data_args.ddp_timeout))
+    kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=model_args.ddp_timeout))
     accelerator = Accelerator(log_with=data_args.report_to, project_dir=data_args.output_dir, kwargs_handlers=[kwargs])
     accelerator.init_trackers(project_name=data_args.wandb_project)
 
