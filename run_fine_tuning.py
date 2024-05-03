@@ -236,23 +236,23 @@ class DataTrainingArguments:
             )
         },
     )
-    text_column_name: str = field(
+    text_column_name: Optional[List[str]] = field(
         default=None,
         metadata={"help": "The name of the dataset column containing the generated text data in the training set."},
     )
-    prompt_column_name: str = field(
+    prompt_column_name: Optional[List[str]]  = field(
         default=None,
         metadata={"help": "The name of the dataset column containing the prompt data. Defaults to 'prompt'"},
     )
-    eval_text_column_name: str = field(
+    eval_text_column_name: Optional[List[str]]  = field(
         default=None,
         metadata={"help": "The name of the dataset column containing the generated text data in the evaluation set."},
     )
-    eval_prompt_column_name: str = field(
+    eval_prompt_column_name: Optional[List[str]]  = field(
         default=None,
         metadata={"help": "The name of the dataset column containing the prompt data in the evaluation set."},
     )
-    max_label_length: int = field(
+    max_label_length: Optional[int] = field(
         default=4096,
         metadata={"help": "Truncate target labels that are longer `max_label_length` tokens."},
     )
@@ -922,7 +922,6 @@ def main():
         revision=model_args.model_revision,
         subfolder=model_args.subfolder,
         token=model_args.token,
-        torch_dtype=torch_dtype,
         low_cpu_mem_usage=True,
         attn_implementation=model_args.attn_implementation,
         quantization_config=quantization_config,
@@ -985,9 +984,8 @@ def main():
         instruction_model = "instruct" in model_args.model_name_or_path.lower()
     if instruction_model and "prompt" not in raw_datasets_train_features:
         raise ValueError(
-            "Distilling an instruction model, but training dataset does not contain prompt-response pairs. Ensure"
-            "the dataset includes both prompts and responses, which should be specified with the `--prompt_column_name`"
-            f"and `--text_column_name` arguments respectively. Got the following columns: {' '.join(list(raw_datasets_train_features))}."
+            "Distilling an instruction model, but `--prompt_column_name` is set to None. "
+            "Ensure `--prompt_column_name` is set according to the dataset features."
         )
 
     # 10.2: filter based on maximum number of training/evaluation samples
