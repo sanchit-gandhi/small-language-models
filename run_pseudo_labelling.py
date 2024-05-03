@@ -5,12 +5,13 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple
 
 import numpy as np
 import torch
-from accelerate import Accelerator, skip_first_batches
+from accelerate import Accelerator, skip_first_batches, InitProcessGroupKwargs
 from accelerate.logging import get_logger
 from datasets import DatasetDict, load_dataset
 from huggingface_hub import create_repo, get_full_repo_name
@@ -98,6 +99,7 @@ class ModelArguments:
     torch_compile: Optional[bool] = field(
         default=False, metadata={"help": "Whether to compile the forward pass (not sampling) in generate."}
     )
+    ddp_timeout: Optional[float] = field(default=7200, metadata={"help": "Set the DDP timeout limit in seconds."})
 
 
 @dataclass
@@ -345,7 +347,8 @@ def main():
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    accelerator = Accelerator(log_with=data_args.report_to, project_dir=data_args.output_dir,)
+    kwargs = InitProcessGroupKwargs(timeout=timedelta(seconds=data_args.ddp_timeout))
+    accelerator = Accelerator(log_with=data_args.report_to, project_dir=data_args.output_dir, kwargs_handlers=[kwargs])
     accelerator.init_trackers(project_name=data_args.wandb_project)
 
     if data_args.overwrite_output_dir and os.path.exists(data_args.output_dir):
