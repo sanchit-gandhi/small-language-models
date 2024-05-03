@@ -2,7 +2,7 @@
 #SBATCH --job-name=distil-mistral
 #SBATCH --nodes=1
 # set 24h for job wall time limit
-#SBATCH --time=24:00:00
+#SBATCH --time=48:00:00
 #SBATCH --ntasks-per-node=1          # crucial - only 1 task per dist per node!
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:8
@@ -42,8 +42,13 @@ function unused_port() {
 }
 MASTER_PORT=$(unused_port)
 
-export PROGRAM="./run_cosmo.sh"
-export CMD="$PROGRAM"
+# export TORCH_CPP_LOG_LEVEL=INFO
+# export TORCH_DISTRIBUTED_DEBUG=DETAIL
+
+export LAUNCHER="python -u -m accelerate.commands.launch --config_file ./accelerate_config.yaml"
+
+export PROGRAM="./run_pseudo_labelling.py ./config_cosmo_websamples.yaml"
+export CMD="$LAUNCHER $PROGRAM"
 echo $CMD
 
 SRUN_ARGS=" \
@@ -54,5 +59,17 @@ SRUN_ARGS=" \
 # py-spy top -s -i -n -- $LAUNCHER --node_rank $SLURM_PROCID --role $SLURMD_NODENAME: $CMD
 clear; srun $SRUN_ARGS --jobid $SLURM_JOB_ID bash -c "$CMD" 2>&1 | tee -a $SAVE_DIR/logs/main_log.txt
 
+
+# srun error handling:
+# --wait=60: wait 60 sec after the first task terminates before terminating all remaining tasks
+# --kill-on-bad-exit=1: terminate a step if any task exits with a non-zero exit code
+
+# SRUN_ARGS=" \
+#     --wait=60 \
+#     --kill-on-bad-exit=1 \
+#     "
+#
+# # py-spy top -s -i -n -- $LAUNCHER --node_rank $SLURM_PROCID --role $SLURMD_NODENAME: $CMD
+# clear; srun $SRUN_ARGS --jobid $SLURM_JOBID bash -c "$CMD" 2>&1 | tee -a $SAVE_DIR/logs/main_log.txt
 
 echo "END TIME: $(date)"

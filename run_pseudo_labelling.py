@@ -350,7 +350,8 @@ def main():
 
     if data_args.overwrite_output_dir and os.path.exists(data_args.output_dir):
         logger.info("Cleaning output dir from previous run...")
-        clean_checkpoints(data_args.output_dir)
+        if accelerator.is_main_process:
+            clean_checkpoints(data_args.output_dir)
 
     # 5. Handle the repository creation
     if accelerator.is_main_process:
@@ -397,7 +398,8 @@ def main():
 
     if data_args.max_eval_samples is not None:
         for split in raw_datasets:
-            raw_datasets[split] = raw_datasets[split].select(range(data_args.max_eval_samples))
+            max_eval_samples = min(len(raw_datasets[split]), data_args.max_eval_samples)
+            raw_datasets[split] = raw_datasets[split].select(range(max_eval_samples))
 
     # 4. Load pre-trained model
     logger.info("*** Load pretrained model ***")
@@ -536,7 +538,7 @@ def main():
 
         with accelerator.main_process_first():
             vectorized_datasets[split] = vectorized_datasets[split].add_column("logprobs", all_logprobs)
-            vectorized_datasets[split] = vectorized_datasets[split].rename_column("labels")
+            vectorized_datasets[split] = vectorized_datasets[split].remove_columns("labels")
 
     if accelerator.is_main_process:
         vectorized_datasets.save_to_disk(data_args.output_dir)

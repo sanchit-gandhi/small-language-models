@@ -10,4 +10,4 @@ preprocessing_num_workers: 32
 output_dir: ./comsopedia-100k-logprobs
 push_to_hub: true
 report_to: wandb
-wandb_project: distil-mixtral
+wandb_project: distil-mixtral-logprobs
