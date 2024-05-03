@@ -94,7 +94,7 @@ class ModelArguments:
             "help": "Whether or not to use an authentication token when loading/uploading from the Hugging Face Hub"
         },
     )
-    temperature: Optional[float] = field(default=0.6, metadata={"help": "Temperature for sampling-based generation"})
+    temperature: Optional[float] = field(default=0.0, metadata={"help": "Temperature for sampling-based generation"})
     torch_compile: Optional[bool] = field(
         default=False, metadata={"help": "Whether to compile the forward pass (not sampling) in generate."}
     )
@@ -364,7 +364,7 @@ def main():
                 )
             else:
                 repo_name = data_args.hub_dataset_id
-            create_repo(repo_name, exist_ok=True, token=model_args.token)
+            create_repo(repo_name, exist_ok=True, repo_type="dataset", token=model_args.token)
             with open(os.path.join(data_args.output_dir, ".gitignore"), "w+") as gitignore:
                 if "wandb" not in gitignore:
                     gitignore.write("wandb\n")
@@ -488,7 +488,8 @@ def main():
         shifted_labels = batch.pop("labels")[..., 1:]
         shifted_logits = model(**batch).logits[..., :-1, :]
 
-        logprobs = nn.functional.log_softmax((shifted_logits * rescale_temperature).float(), dim=-1).to(shifted_logits.dtype)
+        shifted_logits = (shifted_logits * rescale_temperature).float()
+        logprobs = nn.functional.log_softmax(shifted_logits, dim=-1).to(shifted_logits.dtype)
         logprobs = torch.gather(logprobs, dim=2, index=shifted_input_ids.unsqueeze(-1))
 
         sum_logprobs = (logprobs.squeeze(-1) * (shifted_labels != -100)).sum(-1)
@@ -535,6 +536,7 @@ def main():
 
         with accelerator.main_process_first():
             vectorized_datasets[split] = vectorized_datasets[split].add_column("logprobs", all_logprobs)
+            vectorized_datasets[split] = vectorized_datasets[split].rename_column("labels")
 
     if accelerator.is_main_process:
         vectorized_datasets.save_to_disk(data_args.output_dir)
