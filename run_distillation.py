@@ -921,9 +921,10 @@ def main():
                     raw_datasets[pretty_name] = raw_datasets[pretty_name].rename_column(
                         dataset_dict["text_column_name"], "text"
                     )
-                if dataset_dict["prompt_column_name"] and dataset_dict["prompt_column_name"] != "prompt":
-                    raw_datasets[pretty_name] = raw_datasets[pretty_name].rename_column(
-                        dataset_dict["prompt_column_name"], "prompt"
+                if dataset_dict["prompt_column_name"]:
+                    if dataset_dict["prompt_column_name"] != "prompt":
+                        raw_datasets[pretty_name] = raw_datasets[pretty_name].rename_column(
+                            dataset_dict["prompt_column_name"], "prompt"
                     )
                     columns_to_keep.add("prompt")
                 raw_datasets[pretty_name] = raw_datasets[pretty_name].remove_columns(
@@ -1023,7 +1024,7 @@ def main():
     if training_args.gradient_checkpointing:
         if training_args.freeze_embeddings or training_args.freeze_n_layers:
             raise ValueError(
-                "Gradient checkpointing is not compatible with `--freeze_embeddings` or `--freeze_n_layers`."
+                "Gradient checkpointing is not compatible with `--freeze_embeddings` or `--freeze_n_layers`. "
                 "Either un-freeze these layers, or set `--gradient_checkpointing=False`."
             )
         student_model.gradient_checkpointing_enable()
