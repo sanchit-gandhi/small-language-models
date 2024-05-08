@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, HfArgumentParser
 
 
 logger = logging.getLogger(__name__)
-
+logger.setLevel(logging.INFO)
 
 @dataclass
 class ModelArguments:
