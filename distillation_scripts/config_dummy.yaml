@@ -3,13 +3,28 @@ model_name_or_path: sanchit-gandhi/tiny-random-MistralForCausalLM-1-layer
 teacher_model_name_or_path: sanchit-gandhi/tiny-random-MistralForCausalLM-1-layer
 dtype: bfloat16
 load_teacher_in_4bit: true
+optim: adamw_bnb_8bit
+freeze_embeddings: true
+freeze_n_layers: 1
 
 # Data arguments
-train_dataset_name: HuggingFaceTB/cosmopedia-100k
-train_dataset_config_name: default
-train_split_name: train[:100]
-eval_split_name: train[-10:]
-num_train_epochs: 2
+train_dataset_name: HuggingFaceTB/cosmopedia
+train_dataset_config_name:
+  - auto_math_text
+  - khanacademy
+  - openstax
+  - stanford
+  - stories
+  - web_samples_v1
+  - web_samples_v2
+  - wikihow
+train_split_name: train[1000:]
+eval_split_name: train[:1000]
+prompt_column_name: prompt
+eval_prompt_column_name: prompt
+max_steps: 200
+max_train_samples: 1000
+max_eval_samples: 100
 
 # Training arguments
 do_train: true
@@ -18,7 +33,7 @@ per_device_eval_batch_size: 4
 per_device_train_batch_size: 4
 learning_rate: 0.0003
 warmup_steps: 10
-gradient_checkpointing: true
+gradient_checkpointing: false
 dataloader_num_workers: 2
 preprocessing_num_workers: 2
 save_strategy: epoch
@@ -28,3 +43,4 @@ overwrite_output_dir: true
 output_router_logits: true
 report_to: wandb
 output_dir: ./
+wandb_project: distil-mistral-dummy

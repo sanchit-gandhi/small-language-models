@@ -1,5 +1,5 @@
 # Model arguments
-model_name_or_path: sanchit-gandhi/Mistral-1.5B-Instruct-v0.2
+model_name_or_path: sanchit-gandhi/Mistral-1.5B-Instruct-v0.2-first-6
 teacher_model_name_or_path: mistralai/Mistral-7B-Instruct-v0.2
 dtype: bfloat16
 load_teacher_in_4bit: true
@@ -31,10 +31,10 @@ do_eval: true
 per_device_eval_batch_size: 4
 per_device_train_batch_size: 4
 gradient_accumulation_steps: 2
+gradient_checkpointing: false
 max_label_length: 4096
 learning_rate: 0.0001
 warmup_steps: 500
-gradient_checkpointing: false
 dataloader_num_workers: 4
 preprocessing_num_workers: 32
 ddp_timeout: 7200
