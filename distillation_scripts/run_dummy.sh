@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 
-accelerate launch --multi_gpu --num_processes=8 --gpu_ids="all" run_distillation.py \
+accelerate launch --num_processes=1 --gpu_ids="1" run_distillation.py \
   --model_name_or_path "sanchit-gandhi/tiny-random-MistralForCausalLM-1-layer" \
   --teacher_model_name_or_path "sanchit-gandhi/tiny-random-MistralForCausalLM-1-layer" \
   --output_dir "./" \
-  --train_dataset_name "HuggingFaceTB/cosmopedia-100k" \
+  --train_dataset_name "sanchit-gandhi/comsopedia-100k-logprobs" \
   --train_dataset_config_name "default" \
 	--train_split_name "train[1000:]" \
 	--eval_split_name "train[:1000]" \
@@ -18,6 +18,7 @@ accelerate launch --multi_gpu --num_processes=8 --gpu_ids="all" run_distillation
   --max_eval_samples 100 \
   --per_device_eval_batch_size 8 \
   --per_device_train_batch_size 8 \
+  --logprob_threshold -2.0 \
   --save_strategy "no" \
 	--evaluation_strategy "epoch" \
 	--logging_steps 1 \

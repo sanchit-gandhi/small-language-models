@@ -45,7 +45,7 @@ MASTER_PORT=$(unused_port)
 # export TORCH_CPP_LOG_LEVEL=INFO
 # export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
-export LAUNCHER="python -u -m accelerate.commands.launch --config_file ./accelerate_config.yaml"
+export LAUNCHER="python -u -m accelerate.commands.launch --config_file ./accelerate_config.yaml --enable_numa_affinity"
 
 export PROGRAM="./run_distillation.py ./config_mistral.yaml"
 export CMD="$LAUNCHER $PROGRAM"
