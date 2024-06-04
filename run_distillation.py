@@ -263,6 +263,10 @@ class DataTrainingArguments:
         default=4096,
         metadata={"help": "Truncate target labels that are longer `max_label_length` tokens."},
     )
+    logprob_threshold: Optional[float] = field(
+        default=None,
+        metadata={"help": "Filter training examples with avg log-probability less than `logprob_threshold`."},
+    )
     pad_target_to_multiple_of: Optional[int] = field(
         default=None,
         metadata={
@@ -559,6 +563,7 @@ def load_multiple_datasets(
     dataset_samples: Optional[Union[List, np.array]] = None,
     streaming: Optional[bool] = False,
     seed: Optional[int] = None,
+    use_logprobs: Optional[bool] = False,
     accelerator: Optional[Accelerator] = None,
     **kwargs,
 ) -> Union[Dataset, IterableDataset]:
@@ -612,6 +617,14 @@ def load_multiple_datasets(
             elif dataset_dict["prompt_column_name"] != "prompt":
                 dataset = dataset.rename_column(dataset_dict["prompt_column_name"], "prompt")
             columns_to_keep.add("prompt")
+
+        if use_logprobs:
+            if "logprobs" not in dataset_features:
+                raise ValueError(
+                    "If setting `logprob_threshold`, ensure that the column 'logprobs' is in the dataset "
+                    f"'{dataset_dict['name']}'. Got the following columns: {', '.join(dataset_features)}."
+                )
+            columns_to_keep.add("logprobs")
 
         dataset = dataset.remove_columns(set(dataset_features - columns_to_keep))
         all_datasets.append(dataset)
@@ -783,7 +796,7 @@ def main():
             "max_steps": training_args.max_steps,
             "gradient_accumulation_steps": training_args.gradient_accumulation_steps,
             "per_device_train_batch_size": training_args.per_device_train_batch_size,
-            "global_batch_size": training_args.per_device_train_batch_size * accelerator.num_processes,
+            "global_batch_size": training_args.per_device_train_batch_size  * training_args.gradient_accumulation_steps *  accelerator.num_processes,
             "mixed_precision": mixed_precision,
             "lr_scheduler_type": training_args.lr_scheduler_type,
             "warmup_steps": training_args.warmup_steps,
@@ -791,6 +804,8 @@ def main():
             "adam_beta1": training_args.adam_beta1,
             "adam_beta2": training_args.adam_beta2,
             "temperature": training_args.temperature,
+            "logprob_threshold": data_args.logprob_threshold,
+            "max_label_length": data_args.max_label_length,
         },
     )
 
@@ -818,7 +833,7 @@ def main():
 
     # 4. Detecting last checkpoint and eventually continue from last checkpoint
     last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
+    if os.path.isdir(training_args.output_dir) and not training_args.overwrite_output_dir:
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
         if last_checkpoint is None and len(sorted_checkpoints(training_args.output_dir)) > 0:
             raise ValueError(
@@ -856,22 +871,22 @@ def main():
     # set seed for determinism
     set_seed(training_args.seed)
 
-    if training_args.do_train:
-        raw_datasets["train"] = load_multiple_datasets(
-            data_args.train_dataset_name,
-            data_args.train_dataset_config_name,
-            splits=data_args.train_split_name,
-            text_column_names=data_args.text_column_name,
-            prompt_column_names=data_args.prompt_column_name,
-            streaming=data_args.streaming,
-            dataset_samples=data_args.train_dataset_samples,
-            seed=training_args.seed,
-            accelerator=accelerator,
-            cache_dir=data_args.dataset_cache_dir,
-            token=model_args.token,
-            num_proc=data_args.preprocessing_num_workers,
-        )
-        raw_datasets_train_features = set(raw_datasets["train"].features.keys())
+    raw_datasets["train"] = load_multiple_datasets(
+        data_args.train_dataset_name,
+        data_args.train_dataset_config_name,
+        splits=data_args.train_split_name,
+        text_column_names=data_args.text_column_name,
+        prompt_column_names=data_args.prompt_column_name,
+        streaming=data_args.streaming,
+        dataset_samples=data_args.train_dataset_samples,
+        seed=training_args.seed,
+        use_logprobs=data_args.logprob_threshold is not None,
+        accelerator=accelerator,
+        cache_dir=data_args.dataset_cache_dir,
+        token=model_args.token,
+        num_proc=data_args.preprocessing_num_workers,
+    )
+    raw_datasets_train_features = set(raw_datasets["train"].features.keys())
 
     if training_args.do_eval:
         dataset_names_dict = convert_dataset_str_to_list(
@@ -931,11 +946,6 @@ def main():
                     set(raw_datasets[pretty_name].features.keys()) - columns_to_keep
                 )
 
-    if not training_args.do_train and not training_args.do_eval:
-        raise ValueError(
-            "Cannot not train and not do evaluation. At least one of training or evaluation has to be performed."
-        )
-
     # 7. Load pretrained model, tokenizer, and feature extractor
     config = AutoConfig.from_pretrained(
         (model_args.config_name if model_args.config_name else model_args.model_name_or_path),
@@ -961,6 +971,7 @@ def main():
     )
 
     if model_args.teacher_model_name_or_path:
+        # Teacher-student distillation
         # The teacher model can safely be cast to the dtype of training since we don't
         # update the params
         teacher_model = AutoModelForCausalLM.from_pretrained(
@@ -973,6 +984,7 @@ def main():
             quantization_config=quantization_config_teacher,
         ).eval()
     else:
+        # Shrink and fine-tune
         teacher_model = None
 
     student_model = AutoModelForCausalLM.from_pretrained(
@@ -1061,22 +1073,42 @@ def main():
         )
 
     # 10.2: filter based on maximum number of training/evaluation samples
-    if training_args.do_train and data_args.max_train_samples is not None:
+    if data_args.max_train_samples is not None:
+        max_train_samples = data_args.max_train_samples if data_args.streaming else min(data_args.max_train_samples, len(raw_datasets["train"]))
         raw_datasets["train"] = (
-            raw_datasets["train"].take(data_args.max_train_samples)
+            raw_datasets["train"].take(max_train_samples)
             if data_args.streaming
-            else raw_datasets["train"].select(range(data_args.max_train_samples))
+            else raw_datasets["train"].select(range(max_train_samples))
         )
 
     if training_args.do_eval and data_args.max_eval_samples is not None:
         for eval_split in all_eval_splits:
+            max_eval_samples = data_args.max_eval_samples if data_args.streaming else min(data_args.max_eval_samples,
+                                                                                          raw_datasets[eval_split])
             raw_datasets[eval_split] = (
-                raw_datasets[eval_split].take(data_args.max_eval_samples)
+                raw_datasets[eval_split].take(max_eval_samples)
                 if data_args.streaming
-                else raw_datasets[eval_split].select(range(data_args.max_eval_samples))
+                else raw_datasets[eval_split].select(range(max_eval_samples))
             )
 
-    # 10.3: pre-process training/evaluation datasets
+    # 10.3: filter based on log-probs criteria
+    if data_args.logprob_threshold is not None:
+        logprob_threshold = data_args.logprob_threshold
+
+        def is_logprob_in_range(logprob):
+            return logprob > logprob_threshold
+
+        filter_by_lobprobs_fn = partial(
+            raw_datasets["train"].filter, function=is_logprob_in_range, input_columns=["logprobs"]
+        )
+        with accelerator.main_process_first():
+            raw_datasets["train"] = (
+                filter_by_lobprobs_fn(num_proc=num_workers, desc="filtering train dataset by logprobs")
+                if not data_args.streaming
+                else filter_by_lobprobs_fn()
+            )
+
+    # 10.4: pre-process training/evaluation datasets
     def prepare_dataset(example):
         prompt = example.get("prompt")
         target_text = prompt + example["text"] if prompt is not None else example["text"]
@@ -1100,21 +1132,22 @@ def main():
 
     prepare_dataset = prepare_instruction_dataset if instruction_model else prepare_dataset
     vectorized_datasets = IterableDatasetDict() if data_args.streaming else DatasetDict()
-    if training_args.do_train:
-        # with streaming mode we can only have 1 worker, whereas with non-streaming
-        # we can use `num_workers` (which is much faster)
-        # We gate the pre-processing function accordingly
-        map_fn_train = partial(
-            raw_datasets["train"].map,
-            function=prepare_dataset,
-            remove_columns=raw_datasets_train_features,
+
+    # with streaming mode we can only have 1 worker, whereas with non-streaming
+    # we can use `num_workers` (which is much faster)
+    # We gate the pre-processing function accordingly
+    map_fn_train = partial(
+        raw_datasets["train"].map,
+        function=prepare_dataset,
+        remove_columns=raw_datasets_train_features,
+    )
+    with accelerator.main_process_first():
+        vectorized_datasets["train"] = (
+            map_fn_train(num_proc=num_workers, desc="preprocess train dataset")
+            if not data_args.streaming
+            else map_fn_train()
         )
-        with accelerator.main_process_first():
-            vectorized_datasets["train"] = (
-                map_fn_train(num_proc=num_workers, desc="preprocess train dataset")
-                if not data_args.streaming
-                else map_fn_train()
-            )
+
     if training_args.do_eval:
         for eval_split in all_eval_splits:
             raw_datasets_eval_features = list(raw_datasets[eval_split].features.keys())
@@ -1128,7 +1161,7 @@ def main():
                     else map_fn_eval()
                 )
 
-    # 10.4: Filter training data with labels longer than `max_label_length`
+    # 10.5: Filter training data with labels longer than `max_label_length`
     def is_labels_in_length_range(labels):
         return 0 < len(labels) <= max_label_length
 
